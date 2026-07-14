@@ -1,0 +1,15 @@
+GUIClaw
+Copyright (c) 2026 Lychee Team
+
+This distribution includes software derived from HKUDS/nanobot:
+https://github.com/HKUDS/nanobot
+
+The original nanobot copyright notice is:
+Copyright (c) 2025-present Xubin Ren and the nanobot contributors
+
+The upstream nanobot code and GUIClaw modifications are distributed under the
+MIT License included in LICENSE. Third-party attributions and license notices
+are retained in THIRD_PARTY_NOTICES.md and in applicable source files.
+
+GUIClaw is an independent project and is not an official HKUDS/nanobot
+distribution.

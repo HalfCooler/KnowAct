@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+@theme {
+  --color-earth-bg: rgb(244 239 231);
+  --color-earth-card: rgba(255 253 248 / 0.9);
+  --color-earth-border: rgba(94 109 82 / 0.18);
+  --color-earth-text: rgb(33 37 34);
+  --color-earth-muted: rgb(72 79 74);
+  --color-earth-accent: rgb(55 76 61);
+  --color-earth-accent-light: rgb(96 111 81);
+  --color-earth-badge: rgba(232 240 232 / 0.9);
+  --color-user-bubble: rgb(55 76 61);
+  --color-user-bubble-text: rgb(251 248 241);
+  --color-assistant-bubble: rgba(246 248 245 / 0.95);
+}

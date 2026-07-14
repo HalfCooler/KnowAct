@@ -1,0 +1,58 @@
+name: GUIClaw CI
+
+on:
+  push:
+    paths:
+      - "GUIClaw/**"
+      - ".github/workflows/guiclaw-ci.yml"
+  pull_request:
+    paths:
+      - "GUIClaw/**"
+      - ".github/workflows/guiclaw-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: GUIClaw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: "GUIClaw/uv.lock"
+      - name: Install Python dependencies
+        run: uv sync --extra dev --extra desktop --extra cjk
+      - name: Lint
+        run: >-
+          uv run ruff check nanobot guiclaw scripts
+          --exclude 'guiclaw/agents/implementations/**'
+          --exclude 'guiclaw/agents/utils/prompts/**'
+      - name: Test GUIClaw
+        run: >-
+          uv run pytest -q
+          tests/test_guiclaw*.py
+          tests/test_general_e2e_compact_skill_smoke.py
+          tests/test_induce_compact_skills.py
+          tests/test_induce_gui_memory.py
+          tests/test_shortcut_cache_validation.py
+
+  webui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: GUIClaw/webui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install WebUI dependencies
+        run: bun install --frozen-lockfile
+      - name: Test WebUI
+        run: bun run test
+      - name: Build WebUI
+        run: bun run build
