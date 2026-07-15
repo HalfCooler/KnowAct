@@ -464,8 +464,6 @@ class GuiConfig(Base):
     enable_skill_extraction: bool = False
     enable_memory_extraction: bool = False
     enable_skill_execution: bool = False
-    enable_planner: bool = True  # run complexity gate + TaskPlanner decomposition
-    enable_router: bool = True   # run TreeRouter to dispatch plan atoms (requires enable_planner)
     # Per-step skill validation policy:
     #   strict        - deterministic state_contract + small-model NL valid_state + subgoal recovery
     #   contract_only - deterministic state_contract only; skip NL validation and recovery

@@ -1,9 +1,6 @@
-"""Regression tests for GUI memory split: guide entries to planner, policy to GUI agent.
+"""Regression tests for GUI policy memory injection.
 
 Verifies:
-- PlanningContext.gui_memory_context field exists and is stored
-- Planner system prompt injects guide memory when field is non-empty
-- Planner system prompt omits guide memory when field is empty
 - GuiSubagentTool._load_policy_context initializes and loads POLICY memory
 - GuiAgent keeps policy hints independent from retrieved memory
 - GuiAgent falls back to memory_retriever when policy_context is None
@@ -17,70 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 # ---------------------------------------------------------------------------
-# Test 1: PlanningContext.gui_memory_context field
-# ---------------------------------------------------------------------------
-
-
-def test_planning_context_gui_memory_context_field() -> None:
-    """PlanningContext accepts and stores gui_memory_context."""
-    from nanobot.agent.capabilities import CapabilityCatalog, PlanningContext
-
-    catalog = CapabilityCatalog()
-
-    # Default is empty string
-    pc_default = PlanningContext(catalog=catalog)
-    assert pc_default.gui_memory_context == ""
-
-    # Non-empty value is preserved
-    guide_text = "- [OS] swipe up from bottom to go home\n- [APP] (WeChat) tap the '+' button to compose"
-    pc = PlanningContext(catalog=catalog, gui_memory_context=guide_text)
-    assert pc.gui_memory_context == guide_text
-
-
-# ---------------------------------------------------------------------------
-# Test 2: Planner includes gui_memory_context when non-empty
-# ---------------------------------------------------------------------------
-
-
-def test_planner_system_prompt_includes_gui_memory() -> None:
-    """Planner system prompt contains the guide memory section when gui_memory_context is set."""
-    from nanobot.agent.capabilities import CapabilityCatalog, PlanningContext
-    from nanobot.agent.planner import TaskPlanner
-
-    planner = TaskPlanner(llm=None)
-    guide_text = "- [OS] double-tap home button to open recent apps"
-    pc = PlanningContext(catalog=CapabilityCatalog(), gui_memory_context=guide_text)
-
-    prompt = planner._build_system_prompt(planning_context=pc)
-
-    assert "Device and app knowledge" in prompt, "Expected 'Device and app knowledge' header in prompt"
-    assert guide_text in prompt, "Expected guide content in prompt"
-
-
-# ---------------------------------------------------------------------------
-# Test 3: Planner omits gui_memory_context when empty
-# ---------------------------------------------------------------------------
-
-
-def test_planner_system_prompt_omits_gui_memory_when_empty() -> None:
-    """Planner system prompt does NOT include the guide section when gui_memory_context is empty."""
-    from nanobot.agent.capabilities import CapabilityCatalog, PlanningContext
-    from nanobot.agent.planner import TaskPlanner
-
-    planner = TaskPlanner(llm=None)
-
-    # Test with explicit empty string
-    pc_empty = PlanningContext(catalog=CapabilityCatalog(), gui_memory_context="")
-    prompt = planner._build_system_prompt(planning_context=pc_empty)
-    assert "Device and app knowledge" not in prompt
-
-    # Test with None planning_context
-    prompt_none = planner._build_system_prompt(planning_context=None)
-    assert "Device and app knowledge" not in prompt_none
-
-
-# ---------------------------------------------------------------------------
-# Test 4: GuiSubagentTool._load_policy_context reads policy entries
+# Test 1: GuiSubagentTool._load_policy_context reads policy entries
 # ---------------------------------------------------------------------------
 
 

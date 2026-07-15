@@ -384,19 +384,6 @@ async def test_summarizer_skipped_when_no_trace(
     promote_mock.assert_not_awaited()
 
 
-# ---------------------------------------------------------------------------
-# Task 2 test: nanobot.agent public API exports
-# ---------------------------------------------------------------------------
-
-
-def test_planner_router_exported_from_agent_package() -> None:
-    """TaskPlanner, PlanNode, TreeRouter, NodeResult, RouterContext must be importable from nanobot.agent."""
-    from nanobot.agent import NodeResult, PlanNode, RouterContext, TaskPlanner, TreeRouter
-
-    for cls in (TaskPlanner, PlanNode, TreeRouter, NodeResult, RouterContext):
-        assert isinstance(cls, type), f"{cls!r} is not a class"
-
-
 def test_evaluate_gui_trajectory_counts_only_step_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -485,4 +472,3 @@ def test_load_screenshots_for_judge_supports_screenshot_path_field(tmp_path: Pat
     )
 
     assert screenshots == [b"png-bytes"]
-

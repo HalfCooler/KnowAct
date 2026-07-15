@@ -1,6 +1,6 @@
-"""Phase 2 integration tests — agent loop, planner, router.
+"""Phase 2 integration tests — agent loop, memory, skills, and trajectory.
 
-Covers: AGENT-04, AGENT-05, AGENT-06, SKILL-08, TRAJ-03, TEST-05.
+Covers: AGENT-05, AGENT-06, SKILL-08, TRAJ-03, TEST-05.
 """
 
 from __future__ import annotations
@@ -8,13 +8,12 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
 
-from guiclaw.agent import AgentResult, GuiAgent
+from guiclaw.agent import GuiAgent
 from guiclaw.backends.dry_run import DryRunBackend
 from guiclaw.interfaces import LLMResponse, ToolCall
 from guiclaw.memory.retrieval import MemoryRetriever
@@ -23,8 +22,6 @@ from guiclaw.memory.types import MemoryEntry, MemoryType
 from guiclaw.skills.data import Skill, SkillStep
 from guiclaw.skills.flat import FlatSkillLibrary
 from guiclaw.trajectory.recorder import TrajectoryRecorder
-from nanobot.agent.planner import PlanNode, TaskPlanner
-from nanobot.agent.router import NodeResult, RouterContext, TreeRouter
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -271,134 +268,6 @@ async def test_trajectory_recorded_on_run(tmp_path: Path) -> None:
         "done",
     ]
     assert result_payload["run"]["success"] is True
-
-
-# ---------------------------------------------------------------------------
-# AGENT-04: TaskPlanner decomposes task
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_planner_decomposes_task(tmp_path: Path) -> None:
-    """TaskPlanner should decompose a task into an AND/OR/ATOM tree."""
-    tree_data = {
-        "type": "and",
-        "children": [
-            {"type": "atom", "instruction": "Turn on Wi-Fi", "capability": "gui"},
-            {"type": "atom", "instruction": "Check weather", "capability": "tool"},
-        ],
-    }
-    # Mock LLM that returns a create_plan tool call
-    plan_response = LLMResponse(
-        content="",
-        tool_calls=[
-            ToolCall(
-                id="plan1",
-                name="create_plan",
-                arguments={"tree": tree_data},
-            )
-        ],
-    )
-    llm = _RecordingLLM([plan_response])
-    planner = TaskPlanner(llm=llm)
-
-    plan = await planner.plan("Turn on Wi-Fi and check weather")
-
-    assert plan.node_type == "and"
-    assert len(plan.children) == 2
-    assert plan.children[0].node_type == "atom"
-    assert plan.children[0].capability == "gui"
-    assert plan.children[0].instruction == "Turn on Wi-Fi"
-    assert plan.children[1].capability == "tool"
-
-
-# ---------------------------------------------------------------------------
-# Router: dispatches gui and tool atoms
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_router_dispatches_gui_and_tool_atoms(tmp_path: Path) -> None:
-    """TreeRouter should dispatch ATOM nodes to correct executor by capability."""
-    plan = PlanNode(
-        node_type="and",
-        children=(
-            PlanNode(node_type="atom", instruction="Turn on Wi-Fi", capability="gui"),
-            PlanNode(node_type="atom", instruction="Check weather", capability="tool"),
-        ),
-    )
-
-    mock_gui = AsyncMock()
-    mock_gui.run = AsyncMock(
-        return_value=AgentResult(
-            success=True,
-            summary="Wi-Fi turned on",
-        )
-    )
-
-    mock_tool_registry = object()  # just needs to be non-None
-
-    async def fake_run_tool(node: Any, context: RouterContext) -> NodeResult:  # noqa: ARG001
-        return NodeResult(success=True, output=f"tool:{node.instruction}")
-
-    router = TreeRouter()
-    ctx = RouterContext(
-        task="Turn on Wi-Fi and check weather",
-        gui_agent=mock_gui,
-        tool_registry=mock_tool_registry,
-    )
-
-    with patch.object(TreeRouter, "_run_tool", side_effect=fake_run_tool):
-        result = await router.execute(plan, ctx)
-
-    assert result.success
-    assert "Turn on Wi-Fi" in ctx.completed
-    assert "Check weather" in ctx.completed
-    mock_gui.run.assert_awaited_once_with("Turn on Wi-Fi", max_retries=1)
-
-
-# ---------------------------------------------------------------------------
-# Router: replans on AND-child failure
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_router_replans_on_and_child_failure(tmp_path: Path) -> None:
-    """On AND-child failure, the router should trigger replanning."""
-    plan = PlanNode(
-        node_type="and",
-        children=(
-            PlanNode(node_type="atom", instruction="Step A", capability="gui"),
-            PlanNode(node_type="atom", instruction="Step B", capability="gui"),
-        ),
-    )
-
-    call_count = 0
-
-    async def mock_run(instruction: str, max_retries: int = 1) -> AgentResult:
-        nonlocal call_count
-        call_count += 1
-        if instruction == "Step B":
-            return AgentResult(success=False, summary="Failed", error="Step B failed")
-        return AgentResult(success=True, summary=f"Done: {instruction}")
-
-    mock_gui = AsyncMock()
-    mock_gui.run = AsyncMock(side_effect=mock_run)
-
-    # Planner returns a recovery plan on replan
-    recovery_plan = PlanNode(node_type="atom", instruction="Step B recovery", capability="gui")
-    mock_planner = AsyncMock()
-    mock_planner.replan = AsyncMock(return_value=recovery_plan)
-
-    router = TreeRouter(planner=mock_planner, max_replans=1)
-    ctx = RouterContext(task="Do A then B", gui_agent=mock_gui)
-
-    result = await router.execute(plan, ctx)
-
-    assert result.success
-    mock_planner.replan.assert_awaited_once()
-    replan_kwargs = mock_planner.replan.call_args
-    assert "Step A" in replan_kwargs.kwargs["completed"]
 
 
 # ---------------------------------------------------------------------------

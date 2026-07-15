@@ -1836,11 +1836,7 @@ class GuiSubagentTool(Tool):
         return self._build_backend(backend)
 
     async def _build_memory_retriever(self) -> Any | None:
-        """Build a memory retriever indexed with POLICY entries only.
-
-        Guide entries (os_guide, app_guide, icon_guide) are now consumed by the planner
-        via PlanningContext.gui_memory_context instead of being surfaced here.
-        """
+        """Build the GUI agent's memory retriever from POLICY entries only."""
         if self._embedding_adapter is None:
             return None
 

@@ -22,13 +22,11 @@ from nanobot.agent import context as agent_context
 from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.automation_turns import publish_next_deferred_turn
-from nanobot.agent.capabilities import CapabilityCatalogBuilder, PlanningContext
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.cron_turns import CronTurnCoordinator
 from nanobot.agent.hook import AgentHook, AgentHookContext, AgentTurnHookFactory
 from nanobot.agent.memory import Consolidator
 from nanobot.agent.model_runtime import ModelRuntimeResolver
-from nanobot.agent.planning_memory import PlanningMemoryHintExtractor
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.context import RequestContext, bind_request_context, reset_request_context
@@ -207,39 +205,6 @@ class _EventCallbackHook(AgentHook):
                     "content": context.final_content,
                 }
             )
-
-
-# ---------------------------------------------------------------------------
-# Complexity assessment tool — used by _needs_planning to decide whether a
-# task should be decomposed via TaskPlanner before execution.
-# ---------------------------------------------------------------------------
-
-_COMPLEXITY_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "assess_complexity",
-        "description": (
-            "Determine if a task requires GUI operations that need multi-step planning."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "needs_planning": {
-                    "type": "boolean",
-                    "description": (
-                        "True ONLY if the task requires GUI operations — screen taps, "
-                        "app navigation, interacting with device UI elements, opening "
-                        "or switching between apps on a device screen. "
-                        "False for tasks that can be completed with shell commands, "
-                        "file operations, web searches, API calls, or any non-GUI tool. "
-                        "Pure tool/shell tasks NEVER need planning."
-                    ),
-                }
-            },
-            "required": ["needs_planning"],
-        },
-    },
-}
 
 
 class AgentLoop:
@@ -924,78 +889,6 @@ class AgentLoop:
 
         return None
 
-    @staticmethod
-    def _format_plan_tree(node: Any, *, indent: int = 0) -> str:
-        """Render a plan tree into a human-readable indented outline."""
-        prefix = "  " * indent
-        node_type = getattr(node, "node_type", "unknown")
-        if node_type == "atom":
-            capability = getattr(node, "capability", "unknown")
-            instruction = getattr(node, "instruction", "")
-            route_id = getattr(node, "route_id", None)
-            route_reason = getattr(node, "route_reason", "")
-            fallback_route_ids = tuple(getattr(node, "fallback_route_ids", ()) or ())
-
-            line = f"{prefix}- {str(capability).upper()}: {instruction}"
-            if route_id:
-                line += f" via {route_id}"
-
-            lines = [line]
-            if route_reason:
-                lines.append(f"{prefix}  why: {route_reason}")
-            for fallback_route_id in fallback_route_ids:
-                lines.append(f"{prefix}  fallback -> {fallback_route_id}")
-            return "\n".join(lines)
-
-        header = f"{prefix}{str(node_type).upper()}"
-        children = getattr(node, "children", ()) or ()
-        if not children:
-            return header
-        rendered_children = [
-            AgentLoop._format_plan_tree(child, indent=indent + 1) for child in children
-        ]
-        return "\n".join([header, *rendered_children])
-
-    @classmethod
-    def _build_plan_preview(cls, tree: Any) -> str:
-        """Render a user-facing plan preview message for the current channel."""
-        return "执行计划预览：\n```text\n" + cls._format_plan_tree(tree) + "\n```"
-
-    @staticmethod
-    def _load_gui_memory_for_planner() -> str:
-        """Load os_guide, app_guide, and icon_guide entries from the guiclaw MemoryStore.
-
-        Returns a formatted string of guide entries for planner consumption, or an empty
-        string when the memory directory does not exist or guiclaw is unavailable.
-        Guide entries (not policy) are surfaced here so the planner can refine GUI task
-        instructions with device and app navigation knowledge.
-        """
-        from nanobot.agent.tools.gui import DEFAULT_GUICLAW_MEMORY_DIR
-
-        if not DEFAULT_GUICLAW_MEMORY_DIR.exists():
-            return ""
-        try:
-            from guiclaw.memory.store import MemoryStore as GuiMemoryStore
-            from guiclaw.memory.types import MemoryType
-
-            gui_store = GuiMemoryStore(DEFAULT_GUICLAW_MEMORY_DIR)
-            guide_entries = []
-            for memory_type in (MemoryType.OS_GUIDE, MemoryType.APP_GUIDE, MemoryType.ICON_GUIDE):
-                guide_entries.extend(gui_store.list_all(memory_type=memory_type))
-            if not guide_entries:
-                return ""
-            lines: list[str] = []
-            for entry in guide_entries:
-                tag = entry.memory_type.value.upper()
-                prefix = f"[{tag}]"
-                if entry.app:
-                    prefix += f" ({entry.app})"
-                lines.append(f"- {prefix} {entry.content}")
-            return "\n".join(lines)
-        except Exception:
-            logger.warning("Failed to load GUI guide memory for planner", exc_info=True)
-            return ""
-
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
@@ -1231,182 +1124,6 @@ class AgentLoop:
             result.stop_reason,
             result.had_injections,
         )
-
-    async def _needs_planning(self, task: str) -> bool:
-        """One LLM call to assess whether a task warrants multi-step decomposition.
-
-        Uses the ``assess_complexity`` tool to force a structured Boolean response.
-        Returns ``False`` on any parsing failure (safe default — never blocks
-        execution on gate ambiguity).
-        """
-        direct_tools_summary = "; ".join(
-            f"{d['function']['name']}: {d['function'].get('description', '')}"
-            for d in self.tools.get_definitions()
-        )
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a task complexity assessor for a device automation agent. "
-                    "Determine if the user's task requires GUI operations — interacting "
-                    "with a device screen (tapping, swiping, typing into app UI, navigating "
-                    "between apps, reading screen content). "
-                    "ONLY return True when GUI interaction is needed.\n\n"
-                    f"The agent has these direct tools (no planning needed): {direct_tools_summary}.\n"
-                    "If the task can be accomplished entirely with these tools (shell commands, "
-                    "file I/O, web search, web fetch), return False. "
-                    "Planning is ONLY for tasks that require controlling a device screen."
-                ),
-            },
-            {"role": "user", "content": f"Task: {task}"},
-        ]
-        response = await self.provider.chat_with_retry(
-            messages=messages,
-            tools=[_COMPLEXITY_TOOL],
-            model=self.model,
-        )
-        if response.tool_calls:
-            args = response.tool_calls[0].arguments
-            if isinstance(args, str):
-                import json as _json
-
-                try:
-                    args = _json.loads(args)
-                except Exception:
-                    return False
-            return bool(args.get("needs_planning", False))
-        return False  # safe default: no tool call → treat as simple
-
-    async def _plan_and_execute(
-        self,
-        task: str,
-        *,
-        channel: str | None = None,
-        chat_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
-        """Decompose *task* via TaskPlanner and dispatch via TreeRouter.
-
-        Lazy-imports TaskPlanner and TreeRouter to keep loop.py import overhead
-        low (both modules are only needed when planning is actually triggered).
-
-        A thin ``_GuiDispatchAdapter`` bridges GuiSubagentTool's ``execute()``
-        interface (returns a JSON string) to the ``run()`` interface that
-        ``TreeRouter._run_gui`` expects (returns an object with ``.success``,
-        ``.summary``, ``.error``, ``.trace_path``).
-        """
-        from nanobot.agent.planner import TaskPlanner
-        from nanobot.agent.router import RouterContext, TreeRouter
-
-        class _GuiDispatchAdapter:
-            """Bridges GuiSubagentTool.execute() to TreeRouter._run_gui's expected interface."""
-
-            def __init__(self, tool: Any) -> None:
-                self._tool = tool
-
-            async def run(self, instruction: str, max_retries: int = 1) -> Any:
-                import json as _json
-                from dataclasses import dataclass
-
-                result_json = await self._tool.execute(task=instruction)
-                data = _json.loads(result_json)
-
-                @dataclass
-                class _GuiResult:
-                    success: bool
-                    summary: str
-                    error: str | None
-                    trace_path: str | None
-
-                return _GuiResult(
-                    success=data.get("success", False),
-                    summary=data.get("summary", ""),
-                    error=data.get("error"),
-                    trace_path=data.get("trace_path"),
-                )
-
-        planner = TaskPlanner(llm=self.provider)
-        raw_gui_tool = self.tools.get("gui_task")
-        gui_backend = self._gui_config.backend if self._gui_config is not None else "local"
-        catalog = CapabilityCatalogBuilder().build(
-            tool_registry=self.tools,
-            gui_available=raw_gui_tool is not None,
-            exec_enabled=self.exec_config.enable,
-            gui_backend=gui_backend,
-        )
-        memory_hints = PlanningMemoryHintExtractor(self.workspace).build(
-            task=task,
-            catalog=catalog,
-        )
-        gui_memory_context = self._load_gui_memory_for_planner()
-        # Derive the stable planner route_id from the active backend.
-        # "local" maps to "gui.desktop" (not "gui.local"); "dry-run" falls back to "gui.desktop".
-        active_gui_route = (
-            "gui.adb"
-            if gui_backend == "scrcpy-adb"
-            else f"gui.{gui_backend}"
-            if gui_backend in ("adb", "ios", "hdc", "desktop")
-            else "gui.desktop"
-        )
-        planning_context = PlanningContext(
-            catalog=catalog,
-            memory_hints=memory_hints,
-            gui_memory_context=gui_memory_context,
-            active_gui_route=active_gui_route,
-        )
-        tree = await planner.plan(task, planning_context=planning_context)
-        logger.info("Decomposed plan:\n{}", self._format_plan_tree(tree))
-        logger.debug("Decomposed plan (raw): {}", tree.to_dict())
-        if channel is not None and chat_id is not None:
-            preview_meta = dict(metadata or {})
-            preview_meta["_progress"] = True
-            preview_meta["_plan_preview"] = True
-            await self.bus.publish_outbound(
-                OutboundMessage(
-                    channel=channel,
-                    chat_id=chat_id,
-                    content=self._build_plan_preview(tree),
-                    metadata=preview_meta,
-                )
-            )
-
-        gui_agent = _GuiDispatchAdapter(raw_gui_tool) if raw_gui_tool is not None else None
-
-        # When the router is disabled, skip TreeRouter and dispatch the original
-        # task directly to the GUI agent.  The plan preview above still gives the
-        # user visibility into the intended decomposition.
-        if self._gui_config is not None and not self._gui_config.enable_router:
-            logger.info(
-                "TreeRouter disabled (gui.enable_router=false); dispatching task directly to GUI agent"
-            )
-            if gui_agent is not None:
-                result = await gui_agent.run(task)
-                output: str = (
-                    result.summary if result.success else (result.error or "GUI task failed.")
-                )
-            else:
-                output = "No GUI agent available for direct execution."
-            return output, ["task_planner"], []
-
-        ctx = RouterContext(
-            task=task,
-            gui_agent=gui_agent,
-            tool_registry=self.tools,
-            mcp_client=self.tools,  # MCP tools are also registered in the registry
-        )
-
-        router = TreeRouter(planner=planner, max_replans=2)
-        result = await router.execute(tree, ctx)
-
-        output: str
-        if result.output:
-            output = result.output
-        elif result.success:
-            output = "Done."
-        else:
-            output = result.error or "Task failed."
-
-        return output, ["task_planner", "tree_router"], []
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -2104,38 +1821,6 @@ class AgentLoop:
             "running",
             started_at=ctx.visible_run_started_at,
         )
-        raw_task = ctx.msg.content.strip()
-        use_planning = False
-        if (
-            self._gui_config is not None
-            and self._gui_config.enable_planner
-            and len(raw_task) >= 20
-            and not ctx.ephemeral
-            and not turn_continuation.internal_continuation_inbound(ctx.msg.metadata)
-        ):
-            try:
-                use_planning = await self._needs_planning(raw_task)
-            except Exception:
-                logger.opt(exception=True).debug(
-                    "Complexity gate raised unexpectedly; falling back to direct agent loop"
-                )
-
-        if use_planning:
-            final_content, tools_used, plan_messages = await self._plan_and_execute(
-                raw_task,
-                channel=ctx.msg.channel,
-                chat_id=ctx.msg.chat_id,
-                metadata=ctx.msg.metadata,
-            )
-            ctx.final_content = final_content
-            ctx.tools_used = tools_used
-            ctx.all_messages = plan_messages or ctx.initial_messages + [
-                {"role": "assistant", "content": final_content or ""}
-            ]
-            ctx.stop_reason = "planning"
-            ctx.had_injections = False
-            return "ok"
-
         result = await self._run_agent_loop(
             ctx.initial_messages,
             runtime=ctx.runtime,
