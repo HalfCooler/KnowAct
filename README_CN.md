@@ -8,9 +8,10 @@
 
 <p align="center">
   <a href="README.md">English</a> ·
+  <a href="https://arxiv.org/abs/2607.12625">论文</a> ·
   <a href="GUIClaw/docs/guiclaw-cli.md">CLI 参考</a> ·
   <a href="GUIClaw/ADAPTERS.md">适配器契约</a> ·
-  <a href="GUIClaw/CONTRIBUTING.md">参与贡献</a>
+  <a href="https://github.com/HKUDS/nanobot">nanobot</a>
 </p>
 
 GUIClaw 运行从截图到动作的执行循环：观察当前屏幕，调用多模态模型生成
@@ -21,9 +22,20 @@ GUIClaw 运行从截图到动作的执行循环：观察当前屏幕，调用多
 MIT 许可证和第三方声明。GUIClaw 在此基础上增加了跨平台 GUI 后端、模型动作
 Profile、可复用技能与记忆、Shortcut 验证，以及精简的运行记录。
 
+论文：[KnowAct-GUIClaw: Know Deeply, Act Perfectly, Personal GUI Assistant
+with Self-Evolving Memory and Skill](https://arxiv.org/abs/2607.12625)。
+
+![KnowAct-GUIClaw 实验结果概览](GUIClaw/assets/front.png)
+
 > [!IMPORTANT]
 > GUI 自动化能够点击、输入、启动应用并改变设备状态。请先使用 `--dry-run`
 > 检查配置；涉及验证或敏感数据时，优先使用测试设备和测试账号。
+
+## 架构
+
+GUIClaw 通过 Know–Route–Act–Reflect 循环组织个人 GUI 助手的执行流程。
+
+![Know–Route–Act–Reflect 架构](GUIClaw/assets/know-route-act-reflect.png)
 
 ## 选择安装方式
 
@@ -223,6 +235,12 @@ CLI 支持：
 支持可靠原生 function calling 的模型优先使用 `default`。其他 Profile
 对应各 GUI 模型家族要求的动作输出格式。
 
+## 实验结果
+
+论文中报告的 Pass@1 成功率如下：
+
+![GUIClaw Benchmark 结果](GUIClaw/assets/table.png)
+
 ## 目录结构
 
 ```text
@@ -261,8 +279,27 @@ bun run build
 - [GUIClaw 框架概览](GUIClaw/README.md)
 - [CLI 与配置参考](GUIClaw/docs/guiclaw-cli.md)
 - [适配器模式](GUIClaw/ADAPTERS.md)
-- [nanobot 上游完整文档](https://github.com/HKUDS/nanobot/tree/main/docs)
-- [参与贡献](GUIClaw/CONTRIBUTING.md)
+- [nanobot 文档](https://github.com/HKUDS/nanobot/tree/main/docs)
+- [参与贡献](https://github.com/HKUDS/nanobot/blob/main/CONTRIBUTING.md)
+- [安全策略](https://github.com/HKUDS/nanobot/blob/main/SECURITY.md)
+- [许可证](https://github.com/HKUDS/nanobot/blob/main/LICENSE)
+- [第三方声明](https://github.com/HKUDS/nanobot/blob/main/THIRD_PARTY_NOTICES.md)
+
+## 引用
+
+如果 KnowAct-GUIClaw 对你的研究有帮助，请引用：
+
+```bibtex
+@misc{li2026knowactguiclawknowdeeplyact,
+  title        = {KnowAct-GUIClaw: Know Deeply, Act Perfectly, Personal GUI Assistant with Self-Evolving Memory and Skill},
+  author       = {Yunxin Li and Jinchao Li and Shibo Su and Zhenran Xu and Chenrui Zhao and Tongshu Bian and Xiaoman Liang and Meishan Zhang and Baotian Hu and Min Zhang},
+  year         = {2026},
+  eprint       = {2607.12625},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CL},
+  url          = {https://arxiv.org/abs/2607.12625}
+}
+```
 
 ## 致谢
 
@@ -277,15 +314,15 @@ GUIClaw 基于并参考了以下开源与研究项目：
 - [google-research/reasoning-bank](https://github.com/google-research/reasoning-bank)
   启发了基于 GUI 轨迹提取经验并沉淀可复用记忆的设计。
 
-感谢上述项目的作者与贡献者向社区开放工作成果。各上游项目仍分别受其自身
-许可证与归属要求约束；各项目条款请查看对应仓库，GUIClaw 打包依赖的声明见
-[第三方声明](GUIClaw/THIRD_PARTY_NOTICES.md)。此处列出项目仅用于说明技术影响
-或已记录的复用关系，不表示官方隶属、合作或背书。
+感谢上述项目的作者与贡献者向社区开放工作成果。各项目仍分别受其自身许可证与归属
+要求约束；具体条款请查看对应仓库及 nanobot 的
+[第三方声明](https://github.com/HKUDS/nanobot/blob/main/THIRD_PARTY_NOTICES.md)。
+此处列出项目仅用于说明技术影响或已记录的复用关系，不表示官方隶属、合作或背书。
 
 ## 许可证与归属
 
 GUIClaw 使用 MIT License 发布。仓库保留 nanobot 原始
-[LICENSE](GUIClaw/LICENSE) 与
-[THIRD_PARTY_NOTICES.md](GUIClaw/THIRD_PARTY_NOTICES.md)，并在
-[NOTICE](GUIClaw/NOTICE) 中记录补充归属。GUIClaw 是独立项目，并非
+[LICENSE](https://github.com/HKUDS/nanobot/blob/main/LICENSE)与
+[THIRD_PARTY_NOTICES.md](https://github.com/HKUDS/nanobot/blob/main/THIRD_PARTY_NOTICES.md)，
+并在 [NOTICE](GUIClaw/NOTICE) 中记录补充归属。GUIClaw 是独立项目，并非
 HKUDS/nanobot 官方发行版。

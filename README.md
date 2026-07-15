@@ -8,9 +8,10 @@
 
 <p align="center">
   <a href="README_CN.md">简体中文</a> ·
+  <a href="https://arxiv.org/abs/2607.12625">Paper</a> ·
   <a href="GUIClaw/docs/guiclaw-cli.md">CLI reference</a> ·
   <a href="GUIClaw/ADAPTERS.md">Adapter contract</a> ·
-  <a href="GUIClaw/CONTRIBUTING.md">Contributing</a>
+  <a href="https://github.com/HKUDS/nanobot">nanobot</a>
 </p>
 
 GUIClaw runs a screenshot-to-action loop: observe the current screen, ask a
@@ -23,9 +24,20 @@ and retains its MIT license and third-party notices. GUIClaw adds cross-platform
 GUI backends, model-specific action profiles, reusable skills and memory,
 shortcut validation, and compact run artifacts.
 
+Paper: [KnowAct-GUIClaw: Know Deeply, Act Perfectly, Personal GUI Assistant
+with Self-Evolving Memory and Skill](https://arxiv.org/abs/2607.12625).
+
+![KnowAct-GUIClaw results overview](GUIClaw/assets/front.png)
+
 > [!IMPORTANT]
 > GUI automation can click, type, launch applications, and change device state.
 > Start with `--dry-run` and use a test device or account for validation tasks.
+
+## Architecture
+
+GUIClaw organizes personal GUI assistance as a Know–Route–Act–Reflect loop.
+
+![Know–Route–Act–Reflect architecture](GUIClaw/assets/know-route-act-reflect.png)
 
 ## Choose an installation path
 
@@ -231,6 +243,12 @@ Use `default` for providers with reliable native function calling. Other
 profiles reproduce the action format expected by their corresponding GUI model
 families.
 
+## Results
+
+Pass@1 success rates reported in the paper:
+
+![GUIClaw benchmark results](GUIClaw/assets/table.png)
+
 ## Repository layout
 
 ```text
@@ -269,8 +287,27 @@ bun run build
 - [GUIClaw framework overview](GUIClaw/README.md)
 - [CLI and configuration reference](GUIClaw/docs/guiclaw-cli.md)
 - [Adapter patterns](GUIClaw/ADAPTERS.md)
-- [nanobot upstream documentation](https://github.com/HKUDS/nanobot/tree/main/docs)
-- [Contributing](GUIClaw/CONTRIBUTING.md)
+- [nanobot documentation](https://github.com/HKUDS/nanobot/tree/main/docs)
+- [Contributing](https://github.com/HKUDS/nanobot/blob/main/CONTRIBUTING.md)
+- [Security](https://github.com/HKUDS/nanobot/blob/main/SECURITY.md)
+- [License](https://github.com/HKUDS/nanobot/blob/main/LICENSE)
+- [Third-party notices](https://github.com/HKUDS/nanobot/blob/main/THIRD_PARTY_NOTICES.md)
+
+## Citation
+
+If you use KnowAct-GUIClaw in research, please cite:
+
+```bibtex
+@misc{li2026knowactguiclawknowdeeplyact,
+  title        = {KnowAct-GUIClaw: Know Deeply, Act Perfectly, Personal GUI Assistant with Self-Evolving Memory and Skill},
+  author       = {Yunxin Li and Jinchao Li and Shibo Su and Zhenran Xu and Chenrui Zhao and Tongshu Bian and Xiaoman Liang and Meishan Zhang and Baotian Hu and Min Zhang},
+  year         = {2026},
+  eprint       = {2607.12625},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CL},
+  url          = {https://arxiv.org/abs/2607.12625}
+}
+```
 
 ## Acknowledgements
 
@@ -290,16 +327,16 @@ research projects:
   lessons from GUI trajectories.
 
 We thank the authors and contributors of these projects for making their work
-available to the community. Each upstream project remains subject to its own
-license and attribution requirements; see the linked repositories for their
-terms and [GUIClaw's third-party notices](GUIClaw/THIRD_PARTY_NOTICES.md) for
-bundled dependencies. Mention here denotes technical influence or reuse where
-documented, not official affiliation or endorsement.
+available to the community. Each project remains subject to its own license and
+attribution requirements; see the linked repositories and nanobot's
+[third-party notices](https://github.com/HKUDS/nanobot/blob/main/THIRD_PARTY_NOTICES.md)
+for details. Mention here denotes technical influence or reuse where documented,
+not official affiliation or endorsement.
 
 ## License and attribution
 
 GUIClaw is distributed under the MIT License. The repository retains nanobot's
-original [LICENSE](GUIClaw/LICENSE) and
-[THIRD_PARTY_NOTICES.md](GUIClaw/THIRD_PARTY_NOTICES.md), with additional
-attribution in [NOTICE](GUIClaw/NOTICE). GUIClaw is an independent project and
-is not an official HKUDS/nanobot distribution.
+original [LICENSE](https://github.com/HKUDS/nanobot/blob/main/LICENSE) and
+[THIRD_PARTY_NOTICES.md](https://github.com/HKUDS/nanobot/blob/main/THIRD_PARTY_NOTICES.md),
+with additional attribution in [NOTICE](GUIClaw/NOTICE). GUIClaw is an independent
+project and is not an official HKUDS/nanobot distribution.
