@@ -195,6 +195,9 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert cfg.provider.api_key == "env-key"
     assert cfg.image_scale_ratio == pytest.approx(0.5)
     assert cfg.stagnation_limit == 0
+    assert cfg.enable_skill_execution is False
+    assert cfg.enable_skill_extraction is False
+    assert cfg.enable_memory_extraction is False
 
     custom_config = _write_config(
         tmp_path / "custom.yaml",
@@ -223,11 +226,17 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
           model: qwen-custom
         image_scale_ratio: 0.25
         stagnation_limit: 3
+        enable_skill_execution: true
+        enable_skill_extraction: true
+        enable_memory_extraction: true
         """,
     )
     scaled = cli.load_config(scaled_config)
     assert scaled.image_scale_ratio == pytest.approx(0.25)
     assert scaled.stagnation_limit == 3
+    assert scaled.enable_skill_execution is True
+    assert scaled.enable_skill_extraction is True
+    assert scaled.enable_memory_extraction is True
 
 
 def test_build_backend_variants(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,8 +279,8 @@ def test_cli_runs_dry_run_agent_loop(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from guiclaw.agent import AgentResult
     import guiclaw.cli as cli
+    from guiclaw.agent import AgentResult
 
     config = cli.CliConfig(
         provider=cli.ProviderConfig(
@@ -343,6 +352,108 @@ def test_cli_runs_dry_run_agent_loop(
     assert agent_state["agent_profile"] == "seed"
     assert agent_state["artifacts_root"] == recorder_state["output_dir"]
     assert agent_state["stagnation_limit"] == 0
+    assert agent_state["enable_prompt_skill_selection"] is False
+
+
+def test_standalone_cli_runs_enabled_postprocessing_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import guiclaw.cli as cli
+    from guiclaw.agent import AgentResult
+
+    config = cli.CliConfig(
+        provider=cli.ProviderConfig(
+            base_url="http://localhost:1234/v1",
+            model="qwen-gui",
+            api_key="test-key",
+        ),
+        embedding=cli.EmbeddingConfig(
+            base_url="http://localhost:5678/v1",
+            model="embed-model",
+            api_key="embed-key",
+        ),
+        memory_dir=tmp_path / "memory",
+        skills_dir=tmp_path / "skill",
+        enable_skill_execution=True,
+        enable_skill_extraction=True,
+        enable_memory_extraction=True,
+    )
+    backend = _FakeBackend(platform="android")
+    provider = object()
+    embedding_provider = object()
+    trace_path = tmp_path / "gui_runs" / "run" / "trace.jsonl"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_text("{}\n", encoding="utf-8")
+    agent_state: dict[str, Any] = {}
+    postprocess_state: dict[str, Any] = {}
+
+    class FakeRecorder:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+    class FakeGuiAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            agent_state.update(kwargs)
+
+        async def run(self, task: str, **_: Any) -> AgentResult:
+            return AgentResult(
+                success=True,
+                summary=f"Completed {task}",
+                model_summary=None,
+                trace_path=str(trace_path),
+                steps_taken=2,
+                error=None,
+            )
+
+    class FakePostRunProcessor:
+        def __init__(self, **kwargs: Any) -> None:
+            postprocess_state["init"] = kwargs
+
+        def schedule(self, path: Path | None, **kwargs: Any) -> None:
+            postprocess_state["schedule"] = {"trace_path": path, **kwargs}
+
+        async def drain(self) -> None:
+            postprocess_state["drained"] = True
+
+    async def fake_build_optional_components(*_: Any, **kwargs: Any) -> tuple[Any, Any, Any]:
+        postprocess_state["components_embedding"] = kwargs.get("embedding_provider")
+        return None, object(), types.SimpleNamespace(subgoal_runner=None)
+
+    args = cli.parse_args(["--dry-run", "--task", "Open Contacts"])
+    monkeypatch.setattr(cli, "TrajectoryRecorder", FakeRecorder)
+    monkeypatch.setattr(cli, "GuiAgent", FakeGuiAgent)
+    monkeypatch.setattr(cli, "PostRunProcessor", FakePostRunProcessor, raising=False)
+    monkeypatch.setattr(
+        cli,
+        "build_embedding_provider",
+        lambda _: embedding_provider,
+        raising=False,
+    )
+    monkeypatch.setattr(cli, "build_optional_components", fake_build_optional_components)
+
+    result = asyncio.run(cli._execute_agent(args, config, backend, provider, "Open Contacts"))
+
+    assert result.success is True
+    assert postprocess_state["components_embedding"] is embedding_provider
+    assert agent_state["enable_prompt_skill_selection"] is True
+    assert postprocess_state["init"] == {
+        "llm": provider,
+        "merge_llm": provider,
+        "embedding_provider": embedding_provider,
+        "embedding_signature": "embed-model",
+        "skill_store_root": config.skills_dir,
+        "enable_skill_extraction": True,
+        "enable_memory_extraction": True,
+        "memory_bank_path": config.memory_dir / "gui_memory_bank.jsonl",
+    }
+    assert postprocess_state["schedule"] == {
+        "trace_path": trace_path,
+        "is_success": True,
+        "platform": "android",
+        "task": "Open Contacts",
+    }
+    assert postprocess_state["drained"] is True
 
 
 def test_cli_json_output(
@@ -582,6 +693,7 @@ def test_cli_enables_memory_and_skill_bundle_when_embedding_config_present(
             model="embed-model",
             api_key="embed-key",
         ),
+        enable_skill_execution=True,
         agent_profile="qwen3vl",
     )
     artifacts_root = Path("/tmp/guiclaw-skill-artifacts")
@@ -613,16 +725,30 @@ def test_cli_enables_memory_and_skill_bundle_when_embedding_config_present(
     assert calls["runner"][0]["image_scale_ratio"] == pytest.approx(0.5)
     assert calls["screenshots"][0]["artifacts_root"] == artifacts_root
 
-    before = {key: len(value) for key, value in calls.items()}
+    memory_only = replace(with_embedding, enable_skill_execution=False)
+    memory_retriever_only, disabled_library, disabled_executor = asyncio.run(
+        cli.build_optional_components(
+            memory_only,
+            provider=provider,
+            backend=backend,
+            model_name=memory_only.provider.model,
+            artifacts_root=artifacts_root,
+        )
+    )
+    assert memory_retriever_only is not None
+    assert disabled_library is None
+    assert disabled_executor is None
+
     no_embedding = cli.CliConfig(
         provider=cli.ProviderConfig(
             base_url="http://localhost:1234/v1",
             model="qwen-gui",
             api_key="test-key",
-        )
+        ),
+        enable_skill_execution=True,
     )
 
-    disabled = asyncio.run(
+    no_memory_retriever, bm25_library, bm25_executor = asyncio.run(
         cli.build_optional_components(
             no_embedding,
             provider=provider,
@@ -632,8 +758,9 @@ def test_cli_enables_memory_and_skill_bundle_when_embedding_config_present(
         )
     )
 
-    assert disabled == (None, None, None)
-    assert {key: len(value) for key, value in calls.items()} == before
+    assert no_memory_retriever is None
+    assert bm25_library is not None
+    assert bm25_executor is not None
 
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,7 @@ from guiclaw.memory.policy import load_policy_context
 from guiclaw.memory.retrieval import MemoryRetriever
 from guiclaw.memory.store import MemoryStore
 from guiclaw.paths import DEFAULT_GUI_RUNS_DIR
+from guiclaw.postprocessing import PostRunProcessor
 from guiclaw.skills.action_grounder import ActionGrounder as _AgentActionGrounder
 from guiclaw.skills.executor import LLMStateValidator, SkillExecutor
 from guiclaw.skills.flat import DEFAULT_SKILLS_STORE_DIR, FlatSkillLibrary
@@ -121,6 +122,9 @@ class CliConfig:
     image_scale_ratio: float = 0.5
     memory_dir: Path | None = None
     skills_dir: Path | None = None
+    enable_skill_execution: bool = False
+    enable_skill_extraction: bool = False
+    enable_memory_extraction: bool = False
     agent_profile: str | None = None
     background: bool = False
     background_config: BackgroundConfig = field(default_factory=BackgroundConfig)
@@ -212,6 +216,18 @@ class OpenAICompatibleEmbeddingProvider:
             )
             vectors.extend(item.embedding for item in response.data)
         return np.array(vectors, dtype=np.float32)
+
+
+def build_embedding_provider(
+    config: CliConfig,
+) -> OpenAICompatibleEmbeddingProvider | None:
+    if config.embedding is None:
+        return None
+    return OpenAICompatibleEmbeddingProvider(
+        base_url=config.embedding.base_url,
+        model=config.embedding.model,
+        api_key=config.embedding.api_key,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -386,6 +402,9 @@ def load_config(path: Path | None = None) -> CliConfig:
         image_scale_ratio=_coerce_image_scale_ratio(raw.get("image_scale_ratio"), default=0.5),
         memory_dir=_optional_path(raw.get("memory_dir")),
         skills_dir=_optional_path(raw.get("skills_dir")),
+        enable_skill_execution=_coerce_bool(raw.get("enable_skill_execution"), default=False),
+        enable_skill_extraction=_coerce_bool(raw.get("enable_skill_extraction"), default=False),
+        enable_memory_extraction=_coerce_bool(raw.get("enable_memory_extraction"), default=False),
         agent_profile=_optional_string(raw, "agent_profile"),
     )
 
@@ -440,25 +459,30 @@ async def build_optional_components(
     backend: Any,
     model_name: str,
     artifacts_root: Path,
+    embedding_provider: OpenAICompatibleEmbeddingProvider | None = None,
 ) -> tuple[Any | None, Any | None, Any | None]:
-    if config.embedding is None:
-        return None, None, None
+    if embedding_provider is None and config.embedding is not None:
+        embedding_provider = OpenAICompatibleEmbeddingProvider(
+            base_url=config.embedding.base_url,
+            model=config.embedding.model,
+            api_key=config.embedding.api_key,
+        )
 
-    embedding_provider = OpenAICompatibleEmbeddingProvider(
-        base_url=config.embedding.base_url,
-        model=config.embedding.model,
-        api_key=config.embedding.api_key,
-    )
-    memory_store = MemoryStore(config.memory_dir or DEFAULT_MEMORY_DIR)
-    memory_retriever = MemoryRetriever(embedding_provider=embedding_provider, top_k=5)
-    await memory_retriever.index(memory_store.list_all())
+    memory_retriever = None
+    if embedding_provider is not None:
+        memory_store = MemoryStore(config.memory_dir or DEFAULT_MEMORY_DIR)
+        memory_retriever = MemoryRetriever(embedding_provider=embedding_provider, top_k=5)
+        await memory_retriever.index(memory_store.list_all())
+
+    if not config.enable_skill_execution:
+        return memory_retriever, None, None
 
     try:
         skill_library = FlatSkillLibrary(
             store_dir=config.skills_dir or DEFAULT_SKILLS_DIR,
             embedding_provider=embedding_provider,
             merge_llm=provider,
-            embedding_signature=config.embedding.model,
+            embedding_signature=config.embedding.model if config.embedding else None,
         )
     except TypeError as exc:
         if "embedding_signature" not in str(exc):
@@ -508,12 +532,14 @@ async def _execute_agent(
 ) -> AgentResult:
     """Assemble and run the GUI agent with the given backend and provider."""
     run_root = DEFAULT_GUI_RUNS_DIR / datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S_%f")
+    embedding_provider = build_embedding_provider(config)
     memory_retriever, skill_library, skill_executor = await build_optional_components(
         config,
         provider=provider,
         backend=backend,
         model_name=config.provider.model,
         artifacts_root=run_root,
+        embedding_provider=embedding_provider,
     )
 
     recorder = TrajectoryRecorder(output_dir=run_root, task=task, platform=backend.platform)
@@ -535,10 +561,30 @@ async def _execute_agent(
         intervention_handler=_build_intervention_handler(backend),
         policy_context=load_policy_context(config.memory_dir or DEFAULT_MEMORY_DIR),
         agent_profile=args.agent_profile or config.agent_profile,
+        enable_prompt_skill_selection=config.enable_skill_execution,
         image_scale_ratio=config.image_scale_ratio,
         stagnation_limit=config.stagnation_limit,
     )
-    return await agent.run(task)
+    result = await agent.run(task)
+    if config.enable_skill_extraction or config.enable_memory_extraction:
+        postprocessor = PostRunProcessor(
+            llm=provider,
+            merge_llm=provider,
+            embedding_provider=embedding_provider,
+            embedding_signature=config.embedding.model if config.embedding else None,
+            skill_store_root=config.skills_dir or DEFAULT_SKILLS_DIR,
+            enable_skill_extraction=config.enable_skill_extraction,
+            enable_memory_extraction=config.enable_memory_extraction,
+            memory_bank_path=(config.memory_dir or DEFAULT_MEMORY_DIR) / "gui_memory_bank.jsonl",
+        )
+        postprocessor.schedule(
+            Path(result.trace_path) if result.trace_path else None,
+            is_success=result.success,
+            platform=backend.platform,
+            task=task,
+        )
+        await postprocessor.drain()
+    return result
 
 
 async def run_cli(args: argparse.Namespace) -> AgentResult:
@@ -843,6 +889,14 @@ def _coerce_image_scale_ratio(value: Any, *, default: float) -> float:
     if not (0 < parsed <= 1):
         raise ValueError(f"Expected image_scale_ratio in (0, 1], got {value!r}")
     return parsed
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ValueError(f"Expected boolean, got {value!r}")
+    return value
 
 
 if __name__ == "__main__":
