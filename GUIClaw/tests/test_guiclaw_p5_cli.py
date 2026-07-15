@@ -382,26 +382,27 @@ def test_standalone_cli_runs_enabled_postprocessing_before_return(
     backend = _FakeBackend(platform="android")
     provider = object()
     embedding_provider = object()
-    trace_path = tmp_path / "gui_runs" / "run" / "trace.jsonl"
-    trace_path.parent.mkdir(parents=True)
-    trace_path.write_text("{}\n", encoding="utf-8")
     agent_state: dict[str, Any] = {}
     postprocess_state: dict[str, Any] = {}
 
     class FakeRecorder:
-        def __init__(self, **_: Any) -> None:
-            pass
+        def __init__(self, *, output_dir: Path, **_: Any) -> None:
+            self.path = output_dir / "traj.json"
+            self.path.parent.mkdir(parents=True)
+            self.path.write_text("{}\n", encoding="utf-8")
 
     class FakeGuiAgent:
         def __init__(self, **kwargs: Any) -> None:
             agent_state.update(kwargs)
 
         async def run(self, task: str, **_: Any) -> AgentResult:
+            attempt_dir = agent_state["trajectory_recorder"].path.parent / "attempt_01"
+            attempt_dir.mkdir()
             return AgentResult(
                 success=True,
                 summary=f"Completed {task}",
                 model_summary=None,
-                trace_path=str(trace_path),
+                trace_path=str(attempt_dir),
                 steps_taken=2,
                 error=None,
             )
@@ -448,7 +449,7 @@ def test_standalone_cli_runs_enabled_postprocessing_before_return(
         "memory_bank_path": config.memory_dir / "gui_memory_bank.jsonl",
     }
     assert postprocess_state["schedule"] == {
-        "trace_path": trace_path,
+        "trace_path": agent_state["trajectory_recorder"].path,
         "is_success": True,
         "platform": "android",
         "task": "Open Contacts",

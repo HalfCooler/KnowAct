@@ -578,7 +578,7 @@ async def _execute_agent(
             memory_bank_path=(config.memory_dir or DEFAULT_MEMORY_DIR) / "gui_memory_bank.jsonl",
         )
         postprocessor.schedule(
-            Path(result.trace_path) if result.trace_path else None,
+            recorder.path,
             is_success=result.success,
             platform=backend.platform,
             task=task,
