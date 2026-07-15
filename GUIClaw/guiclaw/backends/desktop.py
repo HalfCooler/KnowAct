@@ -33,18 +33,40 @@ from guiclaw.action import Action, describe_action, resolve_coordinate
 from guiclaw.backends.virtual_display import DisplayInfo
 from guiclaw.observation import Observation
 
-# pyautogui and pyperclip are optional desktop dependencies.  Import them at
-# module level so that patch("guiclaw.backends.desktop.pyautogui") works in
-# tests.  Callers should install the `desktop` extra before using this backend.
-try:
-    import pyautogui
-    import pyperclip
-except ImportError:  # pragma: no cover
-    pyautogui = None  # type: ignore[assignment]
-    pyperclip = None  # type: ignore[assignment]
+# Keep patchable module attributes without importing display-dependent packages
+# until an input action actually needs them.
+pyautogui = None
+pyperclip = None
 
 
 logger = logging.getLogger(__name__)
+
+
+def _require_pyautogui():
+    global pyautogui
+    if pyautogui is None:
+        try:
+            import pyautogui as loaded_pyautogui
+        except ImportError as exc:  # pragma: no cover - depends on optional extras
+            raise RuntimeError(
+                "Install the `desktop` extra to use desktop input actions."
+            ) from exc
+        loaded_pyautogui.PAUSE = 0.0
+        pyautogui = loaded_pyautogui
+    return pyautogui
+
+
+def _require_pyperclip():
+    global pyperclip
+    if pyperclip is None:
+        try:
+            import pyperclip as loaded_pyperclip
+        except ImportError as exc:  # pragma: no cover - depends on optional extras
+            raise RuntimeError(
+                "Install the `desktop` extra to use desktop text input."
+            ) from exc
+        pyperclip = loaded_pyperclip
+    return pyperclip
 
 
 # ---------------------------------------------------------------------------
@@ -83,9 +105,6 @@ class LocalDesktopBackend:
     """
 
     def __init__(self) -> None:
-        if pyautogui is not None:
-            pyautogui.PAUSE = 0.0  # disable built-in per-call delay
-
         system = platform.system()
         if system == "Darwin":
             self._platform = "macos"
@@ -121,7 +140,7 @@ class LocalDesktopBackend:
                 with instructions on how to grant them.
         """
         try:
-            pyautogui.position()
+            _require_pyautogui().position()
         except Exception as exc:
             raise RuntimeError(
                 "Enable Accessibility for Terminal/iTerm in "
@@ -213,59 +232,76 @@ class LocalDesktopBackend:
             ValueError: for unrecognised action types.
         """
         t = action.action_type
+        input_driver = (
+            _require_pyautogui()
+            if t
+            in {
+                "tap",
+                "double_tap",
+                "long_press",
+                "drag",
+                "swipe",
+                "scroll",
+                "input_text",
+                "hotkey",
+                "back",
+                "home",
+            }
+            else None
+        )
 
         if t == "tap":
             x, y = self._resolve_point(action)
-            pyautogui.click(x, y)
+            input_driver.click(x, y)
 
         elif t == "double_tap":
             x, y = self._resolve_point(action)
-            pyautogui.doubleClick(x, y)
+            input_driver.doubleClick(x, y)
 
         elif t == "long_press":
             x, y = self._resolve_point(action)
-            pyautogui.rightClick(x, y)
+            input_driver.rightClick(x, y)
 
         elif t == "drag":
             x1, y1 = self._resolve_point(action)
             x2, y2 = self._resolve_second_point(action)
             duration = (action.duration_ms or 300) / 1000.0
-            pyautogui.mouseDown(x1, y1, button="left")
-            pyautogui.dragTo(x2, y2, duration=duration, button="left")
+            input_driver.mouseDown(x1, y1, button="left")
+            input_driver.dragTo(x2, y2, duration=duration, button="left")
 
         elif t == "swipe":
             x1, y1 = self._resolve_point(action)
             x2, y2 = self._resolve_second_point(action)
             duration = (action.duration_ms or 300) / 1000.0
-            pyautogui.mouseDown(x1, y1, button="left")
-            pyautogui.moveTo(x2, y2, duration=duration)
-            pyautogui.mouseUp(x2, y2, button="left")
+            input_driver.mouseDown(x1, y1, button="left")
+            input_driver.moveTo(x2, y2, duration=duration)
+            input_driver.mouseUp(x2, y2, button="left")
 
         elif t == "scroll":
             if action.x is not None and action.y is not None:
                 scroll_x = self._resolve_x(action.x, relative=action.relative)
                 scroll_y = self._resolve_y(action.y, relative=action.relative)
-                pyautogui.moveTo(scroll_x, scroll_y)
+                input_driver.moveTo(scroll_x, scroll_y)
             pixels = abs(action.pixels or 120)
             clicks = max(1, pixels // 120)
             direction = (action.text or "down").lower()
             if direction == "down":
-                pyautogui.scroll(-clicks)
+                input_driver.scroll(-clicks)
             elif direction == "up":
-                pyautogui.scroll(clicks)
+                input_driver.scroll(clicks)
             elif direction == "left":
-                pyautogui.hscroll(-clicks)
+                input_driver.hscroll(-clicks)
             else:  # right
-                pyautogui.hscroll(clicks)
+                input_driver.hscroll(clicks)
 
         elif t == "input_text":
             paste_key = "command" if self._platform == "macos" else "ctrl"
-            pyperclip.copy(action.text or "")
-            pyautogui.hotkey(paste_key, "v")
+            _require_pyperclip().copy(action.text or "")
+            input_driver.hotkey(paste_key, "v")
 
         elif t == "hotkey":
             keys = self._normalize_keys(action.key or [])
-            pyautogui.hotkey(*keys)
+            input_driver.hotkey(*keys)
 
         elif t == "wait":
             await asyncio.sleep((action.duration_ms or 1000) / 1000.0)
@@ -275,17 +311,17 @@ class LocalDesktopBackend:
 
         elif t == "back":
             if self._platform == "macos":
-                pyautogui.hotkey("command", "[")
+                input_driver.hotkey("command", "[")
             else:
-                pyautogui.hotkey("alt", "left")
+                input_driver.hotkey("alt", "left")
 
         elif t == "home":
             if self._platform == "macos":
-                pyautogui.hotkey("command", "shift", "h")
+                input_driver.hotkey("command", "shift", "h")
             elif self._platform == "linux":
-                pyautogui.hotkey("super")
+                input_driver.hotkey("super")
             else:  # windows
-                pyautogui.hotkey("win", "d")
+                input_driver.hotkey("win", "d")
 
         elif t == "open_app":
             app_name = action.text or ""

@@ -42,6 +42,29 @@ def _make_backend(platform_name: str = "macos") -> Any:
 # ---------------------------------------------------------------------------
 
 
+def test_desktop_module_import_does_not_load_pyautogui(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Importing the backend must not access a real display."""
+    import builtins
+    import importlib
+    import sys
+
+    real_import = builtins.__import__
+
+    def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "pyautogui":
+            raise AssertionError("desktop backend imported pyautogui eagerly")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "guiclaw.backends.desktop", raising=False)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    module = importlib.import_module("guiclaw.backends.desktop")
+
+    assert module.pyautogui is None
+
+
 def test_platform_property_macos() -> None:
     with patch("platform.system", return_value="Darwin"):
         from guiclaw.backends.desktop import LocalDesktopBackend
