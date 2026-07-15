@@ -11,18 +11,8 @@
   <a href="https://arxiv.org/abs/2607.12625">Paper</a> ·
   <a href="GUIClaw/docs/guiclaw-cli.md">CLI reference</a> ·
   <a href="GUIClaw/ADAPTERS.md">Adapter contract</a> ·
-  <a href="https://github.com/HKUDS/nanobot">nanobot</a>
 </p>
 
-GUIClaw runs a screenshot-to-action loop: observe the current screen, ask a
-multimodal model for the next action, execute it, and verify the result. It can
-run as the GUI subsystem of the bundled nanobot host or as a standalone command
-called by another agent framework.
-
-This repository is based on [HKUDS/nanobot](https://github.com/HKUDS/nanobot)
-and retains its MIT license and third-party notices. GUIClaw adds cross-platform
-GUI backends, model-specific action profiles, reusable skills and memory,
-shortcut validation, and compact run artifacts.
 
 Paper: [KnowAct-GUIClaw: Know Deeply, Act Perfectly, Personal GUI Assistant
 with Self-Evolving Memory and Skill](https://arxiv.org/abs/2607.12625).
