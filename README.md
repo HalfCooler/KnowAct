@@ -69,8 +69,6 @@ configured for nanobot.
     "model": "your-vision-model",
     "agentProfile": "default",
     "maxSteps": 15,
-    "enablePlanner": true,
-    "enableRouter": true,
     "enableSkillExecution": true,
     "enablePromptSkillSelection": true,
     "promptSkillTopK": 5,
@@ -180,9 +178,8 @@ Common defaults:
 | Agent profile | `default` | `default` when unset |
 | Maximum steps | `15` | `15` |
 | Image scale | `0.5` | `0.5` |
-| Planner / router | not used | enabled |
-| Prompt skill selection | not exposed as a standalone YAML field | disabled by default |
-| Skill and memory extraction | not exposed as standalone YAML fields | disabled by default |
+| Prompt skill selection | `enable_skill_execution`, disabled by default | disabled by default |
+| Skill and memory extraction | separate YAML switches, disabled by default | disabled by default |
 
 The complete standalone and adapter field tables are in
 [GUIClaw CLI and Configuration Reference](GUIClaw/docs/guiclaw-cli.md).

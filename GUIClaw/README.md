@@ -70,6 +70,18 @@ Runtime data is stored under `~/.guiclaw/` by default. See the
 [CLI and configuration reference](docs/guiclaw-cli.md) for commands, model
 configuration, skills, memory extraction, shortcuts, and storage paths.
 
+Standalone skill reuse and post-run learning are opt-in YAML settings:
+
+```yaml
+enable_skill_execution: true
+enable_skill_extraction: true
+enable_memory_extraction: true
+```
+
+An optional `embedding` block enables semantic memory and skill retrieval;
+skill execution otherwise falls back to BM25. The CLI waits for enabled
+post-run extraction before it exits.
+
 On the first GUI task, an empty memory store receives a conservative `POLICY`
 entry in `~/.guiclaw/memory/policy.md`: permission requests are denied, cancelled,
 or deferred unless the task explicitly authorizes them. Existing policies are not

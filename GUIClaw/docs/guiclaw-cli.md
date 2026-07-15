@@ -212,8 +212,11 @@ sections are rejected when they affect a supported field.
 | `stagnation_limit` | `0` | Repeated-screen limit; `0` disables the detector. |
 | `image_scale_ratio` | `0.5` | Screenshot scale in `(0, 1]` for model and validation calls. |
 | `agent_profile` | `default` | Prompt and action contract. |
-| `memory_dir` | `~/.guiclaw/memory` | Memory store used when an embedding endpoint is configured. |
-| `skills_dir` | `~/.guiclaw/skill` | Flat skill store used when an embedding endpoint is configured. |
+| `memory_dir` | `~/.guiclaw/memory` | Policy and extracted-memory storage. Retrieval additionally requires `embedding`. |
+| `skills_dir` | `~/.guiclaw/skill` | Flat skill store for online reuse and extraction. |
+| `enable_skill_execution` | `false` | Retrieve skills and expose `use_skill` to the GUI agent. Uses BM25 without `embedding` and hybrid retrieval with it. |
+| `enable_skill_extraction` | `false` | Extract or evolve skills after each run. |
+| `enable_memory_extraction` | `false` | Extract durable GUI memory after each run. |
 | `adb.serial` | ADB-selected device | Android device serial. |
 | `adb.adb_path` | `adb` | ADB executable. |
 | `scrcpy.max_fps` | `12` | Maximum scrcpy stream frame rate. |
@@ -224,7 +227,7 @@ sections are rejected when they affect a supported field.
 | `hdc.serial` | HDC-selected device | HarmonyOS device serial. |
 | `hdc.hdc_path` | `hdc` | HDC executable. |
 
-Example with retrieval enabled:
+Example with skill reuse and post-run learning enabled:
 
 ```yaml
 provider:
@@ -238,11 +241,17 @@ embedding:
 memory_dir: "~/.guiclaw/memory"
 skills_dir: "~/.guiclaw/skill"
 agent_profile: default
+enable_skill_execution: true
+enable_skill_extraction: true
+enable_memory_extraction: true
 ```
 
 The standalone CLI uses the memory retriever when `embedding` is configured.
-Automatic post-run skill and memory extraction is currently managed by the
-nanobot adapter, not by standalone YAML fields.
+Skill execution also works without embeddings through BM25 keyword retrieval.
+When either extraction switch is enabled, the command reuses the same
+`PostRunProcessor` as the nanobot adapter and waits for it before returning.
+Skills are written to `skills_dir/skills.py`; memory is written to
+`memory_dir/gui_memory_bank.jsonl`.
 
 ## nanobot adapter configuration
 
@@ -270,8 +279,6 @@ must refer to a configured nanobot provider and a multimodal model.
     "model": "your-vision-model",
     "agentProfile": "default",
     "maxSteps": 15,
-    "enablePlanner": true,
-    "enableRouter": true,
     "enableSkillExecution": true,
     "enablePromptSkillSelection": true,
     "promptSkillTopK": 5,
@@ -303,7 +310,6 @@ Both camelCase and snake_case keys are accepted.
 | `imageScaleRatio` | `0.5` |
 | `background` | `false` |
 | `displayWidth`, `displayHeight` | `1280`, `720` |
-| `enablePlanner`, `enableRouter` | `true`, `true` |
 | `enableSkillExecution` | `false` |
 | `enablePromptSkillSelection` | `false` |
 | `promptSkillTopK` | `5` |
@@ -505,6 +511,8 @@ protocols and construct `GuiAgent`. See [GUIClaw Adapter Patterns](../ADAPTERS.m
 | No iOS session | Check WebDriverAgent signing, device trust, port forwarding, and `ios.wda_url`. |
 | Desktop capture or input denied | Grant Screen Recording and Accessibility permissions, or check the Linux display session. |
 | No skills are selected in nanobot | Enable both `enableSkillExecution` and `enablePromptSkillSelection`; inspect `~/.guiclaw/skill/skills.py`. |
+| No skills are selected in standalone CLI | Set `enable_skill_execution: true`; configure `embedding` for semantic retrieval or omit it for BM25-only retrieval. |
+| Standalone run produces no extracted skill or memory | Enable `enable_skill_extraction` and/or `enable_memory_extraction`; inspect the task trace and the configured storage paths. |
 | Shortcut validation does not promote | Use a visual verifier for page validation or explicitly allow launchable-only promotion. |
 
 For exact options in the installed version, treat command help as authoritative:

@@ -77,8 +77,6 @@ uv run nanobot onboard --wizard
     "model": "your-vision-model",
     "agentProfile": "default",
     "maxSteps": 15,
-    "enablePlanner": true,
-    "enableRouter": true,
     "enableSkillExecution": true,
     "enablePromptSkillSelection": true,
     "promptSkillTopK": 5,
@@ -186,9 +184,8 @@ GUIClaw 的运行数据与 nanobot workspace 分离：
 | Agent Profile | `default` | 未配置时为 `default` |
 | 最大步数 | `15` | `15` |
 | 图像缩放比例 | `0.5` | `0.5` |
-| Planner / Router | 不使用 | 默认启用 |
-| Prompt Skill 选择 | standalone YAML 暂未暴露 | 默认关闭 |
-| 技能与记忆提取 | standalone YAML 暂未暴露 | 默认关闭 |
+| Prompt Skill 选择 | `enable_skill_execution`，默认关闭 | 默认关闭 |
+| 技能与记忆提取 | 独立 YAML 开关，默认关闭 | 默认关闭 |
 
 完整 standalone 与 adapter 字段表见
 [GUIClaw CLI 与配置参考](GUIClaw/docs/guiclaw-cli.md)。
