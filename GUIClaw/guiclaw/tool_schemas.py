@@ -162,22 +162,53 @@ COMPUTER_USE_TOOL: dict[str, Any] = {
 }
 
 
-def build_computer_use_tool(*, allow_use_skill: bool = False) -> dict[str, Any]:
-    """Return the native GUI tool schema, conditionally enabling prompt skills."""
-    if not allow_use_skill:
+def build_computer_use_tool(
+    *,
+    allow_use_skill: bool = False,
+    platform: str | None = None,
+    available_apps: tuple[str, ...] | list[str] = (),
+) -> dict[str, Any]:
+    """Return the native GUI tool schema for the active platform."""
+    platform_key = str(platform or "").strip().lower()
+    desktop = platform_key in {"macos", "linux", "windows"}
+    if not allow_use_skill and not desktop:
         return COMPUTER_USE_TOOL
 
     tool = copy.deepcopy(COMPUTER_USE_TOOL)
     properties = tool["function"]["parameters"]["properties"]
-    properties["action_type"]["enum"].append("use_skill")
-    properties["skill_id"] = {
-        "type": "string",
-        "description": "Exact skill_id copied from the prompt-visible skill catalog.",
-    }
-    properties["arguments"] = {
-        "type": "object",
-        "description": "Arguments for the selected prompt-visible skill.",
-    }
+    if desktop:
+        properties["action_type"]["enum"].remove("adb_command")
+        properties.pop("command_id")
+        properties.pop("params")
+        app_names = tuple(
+            sorted(
+                {" ".join(str(name).split()) for name in available_apps if str(name).strip()},
+                key=str.casefold,
+            )
+        )
+        if platform_key == "linux" or not app_names:
+            properties["action_type"]["enum"].remove("open_app")
+            properties["text"]["description"] = (
+                "Text for input_text, direction for scroll, or application name for close_app. "
+                "Use a short reason for request_intervention."
+            )
+        else:
+            properties["text"]["description"] = (
+                "Text for input_text, direction for scroll, or application name for "
+                "open_app/close_app. For open_app, text must exactly match one of these "
+                f"installed application names: {'; '.join(app_names)}. "
+                "Use a short reason for request_intervention."
+            )
+    if allow_use_skill:
+        properties["action_type"]["enum"].append("use_skill")
+        properties["skill_id"] = {
+            "type": "string",
+            "description": "Exact skill_id copied from the prompt-visible skill catalog.",
+        }
+        properties["arguments"] = {
+            "type": "object",
+            "description": "Arguments for the selected prompt-visible skill.",
+        }
     return tool
 
 

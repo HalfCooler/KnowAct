@@ -159,6 +159,7 @@ def build_profile_messages(
     model_name: str,
     history_image_window: int,
     compact_prompt_parts: Any | None = None,
+    available_apps: tuple[str, ...] | list[str] = (),
 ) -> list[dict[str, Any]]:
     profile = canonicalize_agent_profile(profile_name)
     if profile == "default":
@@ -168,6 +169,7 @@ def build_profile_messages(
             history=history,
             model_name=model_name,
             compact_prompt_parts=compact_prompt_parts,
+            available_apps=available_apps,
         )
     if _is_general_e2e_profile(profile):
         return _build_general_e2e_messages(
@@ -354,6 +356,7 @@ def _build_default_messages(
     history: list[Any],
     model_name: str,
     compact_prompt_parts: Any | None = None,
+    available_apps: tuple[str, ...] | list[str] = (),
 ) -> list[dict[str, Any]]:
     contract = prompt_contract_for_profile("default")
     skill_ids = tuple(getattr(compact_prompt_parts, "skill_ids", ()) or ())
@@ -361,7 +364,11 @@ def _build_default_messages(
         getattr(compact_prompt_parts, "compact_skill_instructions", "") or ""
     ).strip()
     tool_schema = json.dumps(
-        build_computer_use_tool(allow_use_skill=bool(skill_ids)),
+        build_computer_use_tool(
+            allow_use_skill=bool(skill_ids),
+            platform=current_observation.platform,
+            available_apps=available_apps,
+        ),
         ensure_ascii=False,
     )
     if coordinate_mode_for_profile("default", model_name) == "relative_999":
@@ -386,6 +393,8 @@ def _build_default_messages(
         "",
         "# Environment",
         "",
+        f"- Current platform: {current_observation.platform or 'unknown'}.",
+        f"- Current foreground app: {current_observation.foreground_app or 'unknown'}.",
         "- You are operating on a GUI screen and can only act through the available native tools.",
         "- Some actions may take time to complete, so you may need to wait and observe again.",
         "- Use the latest screenshot as the source of truth.",

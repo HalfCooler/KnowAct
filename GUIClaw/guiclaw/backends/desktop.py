@@ -16,10 +16,12 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import platform
 import sys
 from asyncio.subprocess import PIPE
+from difflib import get_close_matches
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -118,6 +120,7 @@ class LocalDesktopBackend:
         self._monitor_left: int = 0
         self._monitor_top: int = 0
         self._target_display: DisplayInfo | None = None
+        self._windows_app_ids: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # DeviceBackend protocol
@@ -325,12 +328,18 @@ class LocalDesktopBackend:
 
         elif t == "open_app":
             app_name = action.text or ""
+            if self._platform == "linux":
+                raise ValueError("open_app is disabled on Linux")
+            await self._validate_app_name(app_name)
             if self._platform == "macos":
-                await self._run_cmd("open", "-a", app_name, timeout=timeout)
-            elif self._platform == "linux":
-                await self._run_cmd("xdg-open", app_name, timeout=timeout)
+                await self._run_cmd("open", "-a", app_name, timeout=timeout, check=True)
             else:
-                await self._run_cmd("cmd", "/c", "start", "", app_name, timeout=timeout)
+                await self._run_cmd(
+                    "explorer.exe",
+                    f"shell:AppsFolder\\{self._windows_app_ids[app_name]}",
+                    timeout=timeout,
+                    check=True,
+                )
 
         elif t == "close_app":
             app_name = action.text or ""
@@ -348,18 +357,23 @@ class LocalDesktopBackend:
     async def list_apps(self) -> list[str]:
         """Return application names available on the local desktop.
 
-        - macOS: scans ``/Applications`` and ``~/Applications`` for ``.app`` bundles.
+        - macOS: scans user and system application directories for ``.app`` bundles.
         - Linux: parses ``.desktop`` files under ``/usr/share/applications``.
-        - Windows: returns an empty list (not yet implemented).
+        - Windows: queries Start Apps and records the launch AppID for each name.
         """
         if self._platform == "macos":
             return await self._list_apps_macos()
         if self._platform == "linux":
             return await self._list_apps_linux()
-        return []
+        return await self._list_apps_windows()
 
     async def _list_apps_macos(self) -> list[str]:
-        app_dirs = [Path("/Applications"), Path.home() / "Applications"]
+        app_dirs = [
+            Path("/Applications"),
+            Path.home() / "Applications",
+            Path("/System/Applications"),
+            Path("/System/Applications/Utilities"),
+        ]
         names: list[str] = []
         for d in app_dirs:
             if not d.is_dir():
@@ -367,7 +381,7 @@ class LocalDesktopBackend:
             for entry in sorted(d.iterdir()):
                 if entry.suffix == ".app" and entry.is_dir():
                     names.append(entry.stem)
-        return names
+        return sorted(set(names), key=str.casefold)
 
     async def _list_apps_linux(self) -> list[str]:
         desktop_dir = Path("/usr/share/applications")
@@ -385,6 +399,25 @@ class LocalDesktopBackend:
             except OSError:
                 continue
         return names
+
+    async def _list_apps_windows(self) -> list[str]:
+        raw = await self._run_cmd(
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress",
+            timeout=10.0,
+            check=True,
+        )
+        payload = json.loads(raw or "[]")
+        rows = [payload] if isinstance(payload, dict) else payload
+        self._windows_app_ids = {
+            str(row["Name"]).strip(): str(row["AppID"]).strip()
+            for row in rows
+            if isinstance(row, dict) and row.get("Name") and row.get("AppID")
+        }
+        return sorted(self._windows_app_ids, key=str.casefold)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -422,30 +455,59 @@ class LocalDesktopBackend:
         modifier_map = _MODIFIER_MAP.get(platform_key, {})
         return [modifier_map.get(k.lower(), k.lower()) for k in keys]
 
-    async def _run_cmd(self, *args: str, timeout: float = 5.0) -> str:
-        """Run an external command asynchronously and return stdout.
+    async def _validate_app_name(self, app_name: str) -> None:
+        apps = await self.list_apps()
+        if app_name in apps:
+            return
+        matches = get_close_matches(app_name, apps, n=3, cutoff=0.3)
+        hint = f" Did you mean: {', '.join(matches)}?" if matches else ""
+        raise ValueError(
+            f"Unknown {self._platform} application {app_name!r}; use an exact installed "
+            f"application name.{hint}"
+        )
 
-        Returns an empty string on timeout or non-zero exit without raising,
-        so that open_app / close_app failures degrade gracefully.
-        """
+    async def _run_cmd(
+        self,
+        *args: str,
+        timeout: float = 5.0,
+        check: bool = False,
+    ) -> str:
+        """Run a command, optionally surfacing failures with stderr and exit code."""
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=PIPE,
                 stderr=PIPE,
             )
-            try:
-                stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout)
-            except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except Exception:
-                    pass
-                return ""
-            return stdout_bytes.decode(errors="replace").strip()
-        except Exception:
+        except Exception as exc:
+            if check:
+                raise RuntimeError(f"Unable to start command {args!r}: {exc}") from exc
             return ""
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout)
+        except asyncio.TimeoutError as exc:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            if check:
+                raise RuntimeError(f"Command {args!r} timed out after {timeout} seconds") from exc
+            return ""
+        except Exception as exc:
+            if check:
+                raise RuntimeError(f"Command {args!r} failed: {exc}") from exc
+            return ""
+
+        stdout = stdout_bytes.decode(errors="replace").strip()
+        stderr = stderr_bytes.decode(errors="replace").strip()
+        if check and proc.returncode != 0:
+            detail = stderr or stdout or "no error output"
+            raise RuntimeError(
+                f"Command {args!r} failed with exit code {proc.returncode}: {detail}"
+            )
+        return stdout
 
     async def _close_app(self, app_name: str, timeout: float = 5.0) -> None:
         """Close an application gracefully, falling back to force-kill."""

@@ -436,6 +436,7 @@ class GuiAgent:
         )
         self._prompt_skills_by_id: dict[str, Any] = {}
         self._prompt_composite_aliases: set[str] = set()
+        self._available_apps: tuple[str, ...] | None = None
         try:
             parsed_stagnation_limit = int(stagnation_limit)
         except (TypeError, ValueError):
@@ -444,7 +445,11 @@ class GuiAgent:
 
     def _build_tools_list(self) -> list[dict[str, Any]]:
         tools = [
-            build_computer_use_tool(allow_use_skill=bool(self._prompt_skills_by_id))
+            build_computer_use_tool(
+                allow_use_skill=bool(self._prompt_skills_by_id),
+                platform=self.backend.platform,
+                available_apps=self._available_apps or (),
+            )
         ]
         tools.extend(self._shortcut_tools)
         return tools
@@ -525,6 +530,7 @@ class GuiAgent:
         after all retries, ``success`` is ``False`` and ``error`` contains the
         last error message.
         """
+        self._available_apps = None
         # 1. Start trajectory recording
         self._trajectory_recorder.start(phase=ExecutionPhase.AGENT)
 
@@ -695,6 +701,8 @@ class GuiAgent:
                 trace_path=str(run_dir),
                 error=str(exc),
             )
+
+        await self._load_available_apps()
 
         # 2. Initial observation
         initial_screenshot = run_dir / "screenshots" / "000_initial.png"
@@ -2220,6 +2228,25 @@ class GuiAgent:
             model_name=self.model,
             history_image_window=self.history_image_window,
             compact_prompt_parts=prompt_skill_parts,
+            available_apps=self._available_apps or (),
+        )
+
+    async def _load_available_apps(self) -> None:
+        if self._available_apps is not None:
+            return
+        if str(self.backend.platform).lower() not in {"macos", "windows"}:
+            self._available_apps = ()
+            return
+        try:
+            apps = await self.backend.list_apps()
+        except Exception as exc:
+            logger.warning("Unable to list %s applications: %s", self.backend.platform, exc)
+            apps = []
+        self._available_apps = tuple(
+            sorted(
+                {" ".join(str(name).split()) for name in apps if str(name).strip()},
+                key=str.casefold,
+            )
         )
 
     @staticmethod

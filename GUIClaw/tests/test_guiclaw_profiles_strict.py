@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from PIL import Image
@@ -19,7 +21,7 @@ from guiclaw.backends.dry_run import DryRunBackend
 from guiclaw.interfaces import LLMResponse, ToolCall
 from guiclaw.observation import Observation
 from guiclaw.skills.compact_prompt import CompactPromptParts
-from guiclaw.tool_schemas import COMPUTER_USE_TOOL
+from guiclaw.tool_schemas import COMPUTER_USE_TOOL, build_computer_use_tool
 from guiclaw.trajectory.recorder import TrajectoryRecorder
 
 EXPECTED_PROFILES = (
@@ -101,6 +103,99 @@ def test_default_messages_use_native_opencua_contract(tmp_path: Path) -> None:
     assert messages[1]["role"] == "user"
     assert messages[1]["content"][0]["text"] == "Instruction: Open Settings"
     assert messages[1]["content"][-1]["type"] == "image_url"
+
+
+def test_default_messages_include_platform_and_foreground_app(tmp_path: Path) -> None:
+    observation = _observation(tmp_path / "desktop.png")
+    observation.platform = "macos"
+    observation.foreground_app = "Google Chrome"
+
+    messages = build_profile_messages(
+        "default",
+        task="Play a video",
+        current_observation=observation,
+        history=[],
+        model_name="gpt-4.1",
+        history_image_window=3,
+        available_apps=("Google Chrome", "Safari"),
+    )
+
+    system_prompt = messages[0]["content"]
+    assert "- Current platform: macos." in system_prompt
+    assert "- Current foreground app: Google Chrome." in system_prompt
+    assert "adb_command" not in system_prompt
+    assert "On Android, use package names" not in system_prompt
+    assert "Google Chrome" in system_prompt
+    assert "Safari" in system_prompt
+
+
+@pytest.mark.parametrize("platform", ["macos", "linux", "windows"])
+def test_desktop_computer_use_schema_omits_adb_command(platform: str) -> None:
+    tool = build_computer_use_tool(platform=platform, available_apps=("Example App",))
+    properties = tool["function"]["parameters"]["properties"]
+
+    assert "adb_command" not in properties["action_type"]["enum"]
+    assert "command_id" not in properties
+    assert "params" not in properties
+
+
+@pytest.mark.parametrize("platform", ["macos", "windows"])
+def test_desktop_schema_exposes_exact_available_apps(platform: str) -> None:
+    tool = build_computer_use_tool(
+        platform=platform,
+        available_apps=("Safari", "Google Chrome", "Safari"),
+    )
+    properties = tool["function"]["parameters"]["properties"]
+
+    assert "open_app" in properties["action_type"]["enum"]
+    assert "Google Chrome" in properties["text"]["description"]
+    assert "Safari" in properties["text"]["description"]
+
+
+@pytest.mark.parametrize("platform", ["macos", "windows"])
+def test_desktop_schema_hides_open_app_without_catalog(platform: str) -> None:
+    tool = build_computer_use_tool(platform=platform, available_apps=())
+
+    action_types = tool["function"]["parameters"]["properties"]["action_type"]["enum"]
+    assert "open_app" not in action_types
+
+
+def test_linux_schema_hides_open_app_even_with_catalog() -> None:
+    tool = build_computer_use_tool(platform="linux", available_apps=("Firefox",))
+
+    action_types = tool["function"]["parameters"]["properties"]["action_type"]["enum"]
+    assert "open_app" not in action_types
+
+
+def test_gui_agent_uses_backend_platform_for_tool_schema() -> None:
+    agent = GuiAgent.__new__(GuiAgent)
+    agent.backend = SimpleNamespace(platform="macos")
+    agent._available_apps = ("Google Chrome",)
+    agent._prompt_skills_by_id = {}
+    agent._shortcut_tools = []
+
+    tool = agent._build_tools_list()[0]
+    action_types = tool["function"]["parameters"]["properties"]["action_type"]["enum"]
+
+    assert "adb_command" not in action_types
+    assert "open_app" in action_types
+
+
+@pytest.mark.asyncio
+async def test_gui_agent_loads_available_apps_once() -> None:
+    backend = SimpleNamespace(
+        platform="macos",
+        list_apps=AsyncMock(return_value=["Safari", "Google Chrome", "Safari"]),
+    )
+    agent = GuiAgent.__new__(GuiAgent)
+    agent.backend = backend
+    agent._available_apps = None
+
+    await agent._load_available_apps()
+    await agent._load_available_apps()
+
+    assert agent._available_apps == ("Google Chrome", "Safari")
+    backend.list_apps.assert_awaited_once()
 
 
 def test_default_qwen_prompt_describes_relative_grid(tmp_path: Path) -> None:
