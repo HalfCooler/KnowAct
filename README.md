@@ -10,7 +10,7 @@
   <a href="README_CN.md">简体中文</a> ·
   <a href="https://arxiv.org/abs/2607.12625">Paper</a> ·
   <a href="https://shibosusu.github.io/KnowAct-GUIClaw/">Website</a> ·
-  <a href="https://shibosusu.github.io/KnowAct-GUIClaw/">Demo</a> ·
+  <a href="https://shibosusu.github.io/KnowAct-GUIClaw/#demos">Demo</a> ·
   <a href="GUIClaw/docs/guiclaw-cli.md">CLI reference</a> ·
   <a href="GUIClaw/ADAPTERS.md">Adapter contract</a> ·
 </p>
