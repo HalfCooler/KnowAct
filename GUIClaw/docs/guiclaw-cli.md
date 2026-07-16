@@ -253,6 +253,12 @@ When either extraction switch is enabled, the command reuses the same
 Skills are written to `skills_dir/skills.py`; memory is written to
 `memory_dir/gui_memory_bank.jsonl`.
 
+Desktop skill features are permanently disabled even when the individual skill
+switches are enabled. macOS, Linux, and Windows do not retrieve, inject,
+execute, extract, or evolve skills because desktop geometry and accessibility
+state are not stable enough for deterministic replay and validation. Memory
+extraction remains available.
+
 ## nanobot adapter configuration
 
 Run the wizard first:
@@ -510,8 +516,8 @@ protocols and construct `GuiAgent`. See [GUIClaw Adapter Patterns](../ADAPTERS.m
 | No Android device | Run `adb devices`; set `adb.serial` when more than one device is present. |
 | No iOS session | Check WebDriverAgent signing, device trust, port forwarding, and `ios.wda_url`. |
 | Desktop capture or input denied | Grant Screen Recording and Accessibility permissions, or check the Linux display session. |
-| No skills are selected in nanobot | Enable both `enableSkillExecution` and `enablePromptSkillSelection`; inspect `~/.guiclaw/skill/skills.py`. |
-| No skills are selected in standalone CLI | Set `enable_skill_execution: true`; configure `embedding` for semantic retrieval or omit it for BM25-only retrieval. |
+| No skills are selected in nanobot | Desktop skills are unsupported. On mobile, enable both `enableSkillExecution` and `enablePromptSkillSelection`; inspect `~/.guiclaw/skill/skills.py`. |
+| No skills are selected in standalone CLI | Desktop skills are unsupported. On mobile, set `enable_skill_execution: true`; configure `embedding` for semantic retrieval or omit it for BM25-only retrieval. |
 | Standalone run produces no extracted skill or memory | Enable `enable_skill_extraction` and/or `enable_memory_extraction`; inspect the task trace and the configured storage paths. |
 | Shortcut validation does not promote | Use a visual verifier for page validation or explicitly allow launchable-only promotion. |
 

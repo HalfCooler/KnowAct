@@ -80,7 +80,9 @@ enable_memory_extraction: true
 
 An optional `embedding` block enables semantic memory and skill retrieval;
 skill execution otherwise falls back to BM25. The CLI waits for enabled
-post-run extraction before it exits.
+post-run extraction before it exits. On macOS, Linux, and Windows, skill
+retrieval, prompt injection, execution, extraction, and evolution are not
+supported; memory extraction remains independent.
 
 On the first GUI task, an empty memory store receives a conservative `POLICY`
 entry in `~/.guiclaw/memory/policy.md`: permission requests are denied, cancelled,
