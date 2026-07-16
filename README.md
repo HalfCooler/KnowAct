@@ -302,6 +302,11 @@ If you use KnowAct-GUIClaw in research, please cite:
 }
 ```
 
+## Wechat
+
+<img width="1216" height="1105" alt="91e235be22096e355c1f3be4af5033d3" src="https://github.com/user-attachments/assets/6c64fd4e-8c2b-4048-8e64-281d1489f38a" />
+
+
 ## Acknowledgements
 
 GUIClaw builds on and draws inspiration from the following open-source and
