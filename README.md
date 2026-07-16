@@ -9,15 +9,21 @@
 <p align="center">
   <a href="README_CN.md">简体中文</a> ·
   <a href="https://arxiv.org/abs/2607.12625">Paper</a> ·
+  <a href="https://shibosusu.github.io/KnowAct-GUIClaw/">Website</a> ·
+  <a href="https://shibosusu.github.io/KnowAct-GUIClaw/">Demo</a> ·
   <a href="GUIClaw/docs/guiclaw-cli.md">CLI reference</a> ·
   <a href="GUIClaw/ADAPTERS.md">Adapter contract</a> ·
 </p>
 
 
-Paper: [KnowAct-GUIClaw: Know Deeply, Act Perfectly, Personal GUI Assistant
+[KnowAct-GUIClaw: Know Deeply, Act Perfectly, Personal GUI Assistant
 with Self-Evolving Memory and Skill](https://arxiv.org/abs/2607.12625).
 
+You can see the experimental logs and trajectories at [here](https://github.com/HITsz-TMG/KnowAct/releases/tag/Result) 
+
 ![KnowAct-GUIClaw results overview](GUIClaw/assets/front.png)
+
+ KnowAct-GUIClaw + open-source Kimi-2.6 achieves a state-of-the-art 64.1% on the long-horizon MobileWorld benchmark, outperforming all open agent frameworks and closed agents (Seed-2.0-Pro, GPT-5.5). The framework's knowledge memory and execution capabilities generalize to various base models: +8.5% on Kimi-2.6 and +16.2% on Qwen3.5-35B-A3B.
 
 > [!IMPORTANT]
 > GUI automation can click, type, launch applications, and change device state.
