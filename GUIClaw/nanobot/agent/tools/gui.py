@@ -21,6 +21,7 @@ from guiclaw.agent import GuiAgent
 from guiclaw.interfaces import InterventionHandler, InterventionRequest, InterventionResolution
 from guiclaw.paths import resolve_guiclaw_data_dir
 from guiclaw.postprocessing import EvaluationConfig, PostRunProcessor
+from guiclaw.skills import skills_supported_for_platform
 from guiclaw.skills.normalization import (
     annotate_android_apps,
     find_android_apps_in_text,
@@ -1272,7 +1273,8 @@ class GuiSubagentTool(Tool):
         self._skill_libraries: dict[str, Any] = {}
 
         self._backend = self._build_backend(gui_config.backend)
-        skill_runtime_enabled = (
+        platform_skills_enabled = skills_supported_for_platform(self._backend.platform)
+        skill_runtime_enabled = platform_skills_enabled and (
             gui_config.enable_skill_execution or gui_config.enable_prompt_skill_selection
         )
         self._skill_library = (
@@ -1288,7 +1290,9 @@ class GuiSubagentTool(Tool):
             embedding_provider=self._embedding_adapter,
             embedding_signature=self._embedding_signature,
             skill_store_root=get_gui_skill_store_root(self._workspace),
-            enable_skill_extraction=gui_config.enable_skill_extraction,
+            enable_skill_extraction=(
+                gui_config.enable_skill_extraction and platform_skills_enabled
+            ),
             enable_memory_extraction=gui_config.enable_memory_extraction,
             evaluation=EvaluationConfig(
                 enabled=gui_config.evaluation.enabled,
@@ -1541,9 +1545,13 @@ class GuiSubagentTool(Tool):
             max_steps = self._gui_config.max_steps
         policy_context = self._load_policy_context()
         skill_library = None
-        skill_runtime_enabled = (
+        platform_skills_enabled = skills_supported_for_platform(active_backend.platform)
+        skill_runtime_enabled = platform_skills_enabled and (
             self._gui_config.enable_skill_execution
             or self._gui_config.enable_prompt_skill_selection
+        )
+        prompt_skill_selection_enabled = (
+            platform_skills_enabled and self._gui_config.enable_prompt_skill_selection
         )
         if skill_runtime_enabled:
             self._refresh_cached_skill_stores()
@@ -1642,7 +1650,7 @@ class GuiSubagentTool(Tool):
             agent_profile=self._gui_config.agent_profile,
             image_scale_ratio=self._gui_config.image_scale_ratio,
             stagnation_limit=self._gui_config.stagnation_limit,
-            enable_prompt_skill_selection=self._gui_config.enable_prompt_skill_selection,
+            enable_prompt_skill_selection=prompt_skill_selection_enabled,
             prompt_skill_top_k=self._gui_config.prompt_skill_top_k,
             prompt_shortcut_only=self._gui_config.prompt_shortcut_only,
             skill_app_filter_enabled=self._gui_config.prompt_skill_app_filter,

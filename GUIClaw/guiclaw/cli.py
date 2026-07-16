@@ -35,6 +35,7 @@ from guiclaw.memory.retrieval import MemoryRetriever
 from guiclaw.memory.store import MemoryStore
 from guiclaw.paths import DEFAULT_GUI_RUNS_DIR
 from guiclaw.postprocessing import PostRunProcessor
+from guiclaw.skills import skills_supported_for_platform
 from guiclaw.skills.action_grounder import ActionGrounder as _AgentActionGrounder
 from guiclaw.skills.executor import LLMStateValidator, SkillExecutor
 from guiclaw.skills.flat import DEFAULT_SKILLS_STORE_DIR, FlatSkillLibrary
@@ -474,7 +475,10 @@ async def build_optional_components(
         memory_retriever = MemoryRetriever(embedding_provider=embedding_provider, top_k=5)
         await memory_retriever.index(memory_store.list_all())
 
-    if not config.enable_skill_execution:
+    skill_execution_enabled = config.enable_skill_execution and skills_supported_for_platform(
+        backend.platform
+    )
+    if not skill_execution_enabled:
         return memory_retriever, None, None
 
     try:
@@ -532,6 +536,9 @@ async def _execute_agent(
 ) -> AgentResult:
     """Assemble and run the GUI agent with the given backend and provider."""
     run_root = DEFAULT_GUI_RUNS_DIR / datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S_%f")
+    platform_skills_enabled = skills_supported_for_platform(backend.platform)
+    skill_execution_enabled = config.enable_skill_execution and platform_skills_enabled
+    skill_extraction_enabled = config.enable_skill_extraction and platform_skills_enabled
     embedding_provider = build_embedding_provider(config)
     memory_retriever, skill_library, skill_executor = await build_optional_components(
         config,
@@ -561,19 +568,19 @@ async def _execute_agent(
         intervention_handler=_build_intervention_handler(backend),
         policy_context=load_policy_context(config.memory_dir or DEFAULT_MEMORY_DIR),
         agent_profile=args.agent_profile or config.agent_profile,
-        enable_prompt_skill_selection=config.enable_skill_execution,
+        enable_prompt_skill_selection=skill_execution_enabled,
         image_scale_ratio=config.image_scale_ratio,
         stagnation_limit=config.stagnation_limit,
     )
     result = await agent.run(task)
-    if config.enable_skill_extraction or config.enable_memory_extraction:
+    if skill_extraction_enabled or config.enable_memory_extraction:
         postprocessor = PostRunProcessor(
             llm=provider,
             merge_llm=provider,
             embedding_provider=embedding_provider,
             embedding_signature=config.embedding.model if config.embedding else None,
             skill_store_root=config.skills_dir or DEFAULT_SKILLS_DIR,
-            enable_skill_extraction=config.enable_skill_extraction,
+            enable_skill_extraction=skill_extraction_enabled,
             enable_memory_extraction=config.enable_memory_extraction,
             memory_bank_path=(config.memory_dir or DEFAULT_MEMORY_DIR) / "gui_memory_bank.jsonl",
         )
