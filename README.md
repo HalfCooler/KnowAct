@@ -2,6 +2,14 @@
   <img src="GUIClaw/assets/logo.png" width="480" alt="GUIClaw" />
 </p>
 
+<p align="center" style="font-size:32px;">
+KnowAct-GUIClaw: Know Deeply, Act Perfectly, Personal GUI Assistant with Self-Evolving Memory and Skill
+</p>
+
+<p align="center">
+Lychee Team, Harbin Institute of Technology, Shenzhen
+</p>
+
 <p align="center">
   GUI automation for desktop, Android, iOS, and HarmonyOS.
 </p>
@@ -16,8 +24,6 @@
 </p>
 
 
-[KnowAct-GUIClaw: Know Deeply, Act Perfectly, Personal GUI Assistant
-with Self-Evolving Memory and Skill](https://arxiv.org/abs/2607.12625).
 
 You can see the experimental logs and trajectories at [here](https://github.com/HITsz-TMG/KnowAct/releases/tag/Result) 
 
