@@ -1,6 +1,7 @@
 # Vendored from MobileWorld src/mobile_world/agents/implementations/gui_owl_1_5.py for GUIClaw profile parity.
 # Keep upstream provenance comments below when present.
 import json
+import math
 import traceback
 from typing import Any
 
@@ -16,7 +17,52 @@ from guiclaw.agents.utils.prompts import (
     GUI_OWL_1_5_USER_PROMPT_WITH_HISTSTEPS_TEMPLATE,
 )
 
-SCALE_FACTOR = 999
+SCALE_FACTOR = 1000
+
+
+def _normalize_coordinate(
+    values: Any,
+    *,
+    field: str,
+    coordinate_width: int = SCALE_FACTOR,
+    coordinate_height: int = SCALE_FACTOR,
+) -> tuple[list[float], list[Any]]:
+    if not isinstance(values, (list, tuple)) or len(values) not in {2, 4}:
+        raise ValueError(f"Unexpected {field} length: {values}")
+    try:
+        numeric = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {field}: {values}") from exc
+    bounds = (
+        [coordinate_width, coordinate_height]
+        if len(numeric) == 2
+        else [coordinate_width, coordinate_height] * 2
+    )
+    if any(
+        not math.isfinite(value) or not 0 <= value <= bound
+        for value, bound in zip(numeric, bounds, strict=True)
+    ):
+        if coordinate_width == coordinate_height == SCALE_FACTOR:
+            expected = "[0, 1000]"
+        else:
+            expected = (
+                f"x within [0, {coordinate_width}] and "
+                f"y within [0, {coordinate_height}]"
+            )
+        raise ValueError(f"{field} values must be finite with {expected}: {values}")
+    if len(numeric) == 2:
+        point_x, point_y = numeric
+    else:
+        x1, y1, x2, y2 = numeric
+        point_x = (x1 + x2) / 2
+        point_y = (y1 + y2) / 2
+    return [point_x / coordinate_width, point_y / coordinate_height], list(values)
+
+
+def _normalized_to_pixel(value: float, extent: int) -> int:
+    if extent <= 0:
+        raise ValueError(f"Image extent must be positive, got {extent}.")
+    return max(0, min(round(float(value) * extent), extent - 1))
 
 
 def parse_tagged_text(text: str) -> dict:
@@ -60,7 +106,12 @@ def parse_tagged_text(text: str) -> dict:
     return result
 
 
-def parse_action_to_structure_output(text: str) -> dict:
+def parse_action_to_structure_output(
+    text: str,
+    *,
+    coordinate_width: int = SCALE_FACTOR,
+    coordinate_height: int = SCALE_FACTOR,
+) -> dict:
     """
     Parse raw model output into a structured response dict.
 
@@ -85,37 +136,32 @@ def parse_action_to_structure_output(text: str) -> dict:
     action = tool_call["arguments"]
     action_name = tool_call["name"]
 
+    raw_coordinates: dict[str, list[Any]] = {}
+
     # Normalize 'coordinate' to a 2-element [x, y] list in [0, 1] range
     if "coordinate" in action:
-        coordinates = action["coordinate"]
-        if len(coordinates) == 2:
-            point_x, point_y = coordinates
-        elif len(coordinates) == 4:
-            x1, y1, x2, y2 = coordinates
-            point_x = (x1 + x2) / 2
-            point_y = (y1 + y2) / 2
-        else:
-            raise ValueError(f"Unexpected coordinate length: {coordinates}")
-        action["coordinate"] = [point_x / SCALE_FACTOR, point_y / SCALE_FACTOR]
+        action["coordinate"], raw_coordinates["coordinate"] = _normalize_coordinate(
+            action["coordinate"],
+            field="coordinate",
+            coordinate_width=coordinate_width,
+            coordinate_height=coordinate_height,
+        )
 
     # Normalize 'coordinate2' to a 2-element [x, y] list in [0, 1] range
     if "coordinate2" in action:
-        coordinates = action["coordinate2"]
-        if len(coordinates) == 2:
-            point_x, point_y = coordinates
-        elif len(coordinates) == 4:
-            x1, y1, x2, y2 = coordinates
-            point_x = (x1 + x2) / 2
-            point_y = (y1 + y2) / 2
-        else:
-            raise ValueError(f"Unexpected coordinate2 length: {coordinates}")
-        action["coordinate2"] = [point_x / SCALE_FACTOR, point_y / SCALE_FACTOR]
+        action["coordinate2"], raw_coordinates["coordinate2"] = _normalize_coordinate(
+            action["coordinate2"],
+            field="coordinate2",
+            coordinate_width=coordinate_width,
+            coordinate_height=coordinate_height,
+        )
 
     return {
         "thinking": thinking,
         "action_json": action,
         "conclusion": conclusion,
         "action_name": action_name,
+        "raw_coordinates": raw_coordinates,
     }
 
 
@@ -142,10 +188,10 @@ def parsing_response_to_andoid_world_env_action(
             x2, y2 = end_box
             result = {
                 "action_type": GUIOWL2AW_ACTION_MAP["swipe"],
-                "start_x": round(float(x1) * image_width),
-                "start_y": round(float(y1) * image_height),
-                "end_x": round(float(x2) * image_width),
-                "end_y": round(float(y2) * image_height),
+                "start_x": _normalized_to_pixel(x1, image_width),
+                "start_y": _normalized_to_pixel(y1, image_height),
+                "end_x": _normalized_to_pixel(x2, image_width),
+                "end_y": _normalized_to_pixel(y2, image_height),
             }
         else:
             raise ValueError("Invalid swipe: missing coordinate or coordinate2.")
@@ -161,8 +207,8 @@ def parsing_response_to_andoid_world_env_action(
                     x2, y2 = x1, y1
                 else:
                     raise ValueError(f"Invalid coordinate format: {start_box}")
-                x = round(float((x1 + x2) / 2) * image_width)
-                y = round(float((y1 + y2) / 2) * image_height)
+                x = _normalized_to_pixel((x1 + x2) / 2, image_width)
+                y = _normalized_to_pixel((y1 + y2) / 2, image_height)
                 result = {
                     "action_type": GUIOWL2AW_ACTION_MAP[action_type],
                     "x": x,

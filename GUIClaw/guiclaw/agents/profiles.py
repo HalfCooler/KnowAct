@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +45,6 @@ from guiclaw.agents.utils.prompts import (
     GELAB_USER_PROMPT_TEMPLATE,
     GENERAL_E2E_PROMPT_TEMPLATE,
     GUI_OWL_1_5_SYSTEM_PROMPT_TEMPLATE,
-    GUI_OWL_1_5_USER_PROMPT_TEMPLATE,
     GUI_OWL_1_5_USER_PROMPT_WITH_HISTSTEPS_TEMPLATE,
     MAI_MOBILE_SYS_PROMPT_ASK_USER_MCP,
     MOBILE_QWEN3VL_PROMPT_WITH_ASK_USER,
@@ -73,6 +74,11 @@ _CLAUDE_IMAGE_SIZE = (1280, 720)
 _CLAUDE_OPUS_MAX_DIMENSION = 1280
 _MODEL_RELATIVE_GRID_HINTS = ("qwen", "gemini")
 DEFAULT_SCROLL_PIXELS = 400
+_GUI_OWL_HISTORY_TURNS = 4
+_GUI_OWL_IMAGE_FACTOR = 28
+_GUI_OWL_IMAGE_MIN_PIXELS = 3136
+_GUI_OWL_IMAGE_MAX_PIXELS = 10035200
+_ADB_CAPTURE_SOURCES = frozenset({"auto", "scrcpy", "screencap"})
 
 
 def canonicalize_agent_profile(profile_name: str | None) -> str:
@@ -105,6 +111,7 @@ def coordinate_mode_for_profile(profile_name: str | None, model_name: str = "") 
 # use_thinking=True, max_tokens=4096). temperature (0.7) already matches the
 # nanobot provider default, so it is not repeated here.
 _PROFILE_LLM_DEFAULTS: dict[str, dict[str, Any]] = {
+    "gui_owl": {"max_tokens": 2048},
     "seed": {"reasoning_effort": "high", "max_tokens": 4096},
 }
 
@@ -112,6 +119,22 @@ _PROFILE_LLM_DEFAULTS: dict[str, dict[str, Any]] = {
 def profile_llm_defaults(profile_name: str | None) -> dict[str, Any]:
     """Return native LLM runtime defaults for ``profile_name`` (possibly empty)."""
     return dict(_PROFILE_LLM_DEFAULTS.get(canonicalize_agent_profile(profile_name), {}))
+
+
+def resolve_adb_capture_source(
+    capture_source: str,
+    profile_name: str | None,
+) -> str:
+    """Resolve ``auto`` to the capture source appropriate for the profile."""
+    source = str(capture_source or "auto").strip().lower()
+    if source not in _ADB_CAPTURE_SOURCES:
+        raise ValueError(
+            f"Unsupported ADB capture source {capture_source!r}. "
+            f"Expected one of: {', '.join(sorted(_ADB_CAPTURE_SOURCES))}."
+        )
+    if source == "auto":
+        return "screencap" if canonicalize_agent_profile(profile_name) == "gui_owl" else "scrcpy"
+    return source
 
 
 def profile_tool_definition(profile_name: str | None) -> dict[str, Any] | None:
@@ -122,6 +145,10 @@ def profile_tool_definition(profile_name: str | None) -> dict[str, Any] | None:
 
 def _is_general_e2e_profile(profile_name: str | None) -> bool:
     return canonicalize_agent_profile(profile_name) == "general_e2e"
+
+
+def _is_legacy_gui_plus(model_name: str) -> bool:
+    return model_name.rsplit("/", 1)[-1].strip().lower() == "gui-plus"
 
 
 def prompt_contract_for_profile(profile_name: str | None) -> dict[str, tuple[str, ...]]:
@@ -209,7 +236,8 @@ def build_profile_messages(
             task=task,
             current_observation=current_observation,
             history=history,
-            history_image_window=history_image_window,
+            model_name=model_name,
+            history_image_window=_GUI_OWL_HISTORY_TURNS + 1,
         )
     if profile == "venus":
         return _build_ui_venus_messages(
@@ -327,13 +355,28 @@ def parse_profile_action(
         action = _seed_to_action(parsed[0], screen_width=screen_width, screen_height=screen_height)
         return _to_guiclaw_payload(action, summary=content)
     if profile == "gui_owl":
-        structured = gui_owl_1_5.parse_action_to_structure_output(content)
+        if _is_legacy_gui_plus(model_name):
+            coordinate_height, coordinate_width = _gui_owl_smart_resize(
+                screen_height,
+                screen_width,
+            )
+        else:
+            coordinate_height = coordinate_width = gui_owl_1_5.SCALE_FACTOR
+        structured = gui_owl_1_5.parse_action_to_structure_output(
+            content,
+            coordinate_width=coordinate_width,
+            coordinate_height=coordinate_height,
+        )
         action = gui_owl_1_5.parsing_response_to_andoid_world_env_action(
             structured,
             image_height=screen_height,
             image_width=screen_width,
         )
-        return _to_guiclaw_payload(action, summary=structured.get("conclusion") or content)
+        payload = _to_guiclaw_payload(action, summary=structured.get("conclusion") or content)
+        raw_coordinates = structured.get("raw_coordinates")
+        if raw_coordinates:
+            payload["params"] = {"gui_owl_coordinates": raw_coordinates}
+        return payload
     if profile == "venus":
         action_text = _between(content, "<action>", "</action>")
         action_name, action_params = ui_venus_agent.parse_answer(action_text)
@@ -609,34 +652,47 @@ def _build_gui_owl_messages(
     task: str,
     current_observation: Observation,
     history: list[Any],
+    model_name: str,
     history_image_window: int,
 ) -> list[dict[str, Any]]:
     observations = [turn.observation for turn in history] + [current_observation]
     total_history_count = len(history)
     keep_as_messages = min(max(0, history_image_window - 1), total_history_count)
     text_history_count = total_history_count - keep_as_messages
-    first_user_content: list[dict[str, Any]] = []
-    if text_history_count > 0:
-        previous_steps = "\n".join(
-            f"Step{i + 1}: {history[i].action_summary}. Tool response: {history[i].tool_result_message.get('content') or 'None'}"
-            for i in range(text_history_count)
+    previous_steps = (
+        "\n".join(
+            f"Step {index + 1}: {history[index].action_summary}"
+            for index in range(text_history_count)
         )
-        first_user_content.append(
-            {
-                "type": "text",
-                "text": GUI_OWL_1_5_USER_PROMPT_WITH_HISTSTEPS_TEMPLATE.format(
-                    instruction=task,
-                    previous_steps=previous_steps,
-                ),
-            }
+        or "None"
+    )
+    today = datetime.today()
+    dated_instruction = (
+        f"Today's date is: {today:%Y-%m-%d} {today:%A}.{task}"
+    )
+    first_user_content = [
+        {
+            "type": "text",
+            "text": GUI_OWL_1_5_USER_PROMPT_WITH_HISTSTEPS_TEMPLATE.format(
+                instruction=dated_instruction,
+                previous_steps=previous_steps,
+            ),
+        },
+        _gui_owl_image_content(observations[text_history_count]),
+    ]
+    system_prompt = GUI_OWL_1_5_SYSTEM_PROMPT_TEMPLATE.render(tools="")
+    if _is_legacy_gui_plus(model_name):
+        resized_height, resized_width = _gui_owl_smart_resize(
+            current_observation.screen_height,
+            current_observation.screen_width,
         )
-    else:
-        first_user_content.append(
-            {"type": "text", "text": GUI_OWL_1_5_USER_PROMPT_TEMPLATE.format(instruction=task)}
+        system_prompt = system_prompt.replace(
+            "1000x1000",
+            f"{resized_width}x{resized_height}",
+            1,
         )
-    first_user_content.append(_image_content(observations[text_history_count]))
     messages = [
-        {"role": "system", "content": GUI_OWL_1_5_SYSTEM_PROMPT_TEMPLATE.render(tools="")},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": first_user_content},
     ]
     for index in range(text_history_count, total_history_count):
@@ -649,9 +705,10 @@ def _build_gui_owl_messages(
             }
         )
         messages.append(
-            _gui_owl_user_message(
-                observations[index + 1], history[index].tool_result_message.get("content")
-            )
+            {
+                "role": "user",
+                "content": [_gui_owl_image_content(observations[index + 1])],
+            }
         )
     return messages
 
@@ -727,22 +784,19 @@ def _seed_user_message(observation: Observation, tool_result: Any) -> dict[str, 
     return {"role": "tool", "content": [_image_content(observation)], "tool_call_id": "1"}
 
 
-def _gui_owl_user_message(observation: Observation, tool_result: Any) -> dict[str, Any]:
-    return {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": "<tool_response>\n"},
-            {"type": "text", "text": str(tool_result) if tool_result is not None else "None"},
-            _image_content(observation),
-            {"type": "text", "text": "\n</tool_response>"},
-        ],
-    }
-
-
 def _image_content(observation: Observation) -> dict[str, Any]:
     return {
         "type": "image_url",
         "image_url": {"url": f"data:image/png;base64,{_observation_base64(observation)}"},
+    }
+
+
+def _gui_owl_image_content(observation: Observation) -> dict[str, Any]:
+    return {
+        "type": "image_url",
+        "image_url": {
+            "url": f"data:image/png;base64,{_gui_owl_observation_base64(observation)}"
+        },
     }
 
 
@@ -761,6 +815,50 @@ def _observation_base64(observation: Observation) -> str:
     path = Path(observation.screenshot_path)
     with Image.open(path) as image:
         return pil_to_base64(image.convert("RGB"))
+
+
+def _gui_owl_observation_base64(observation: Observation) -> str:
+    if not observation.screenshot_path:
+        raise ValueError("GUI-Owl requires screenshots.")
+    path = Path(observation.screenshot_path)
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        resized_height, resized_width = _gui_owl_smart_resize(
+            image.height,
+            image.width,
+        )
+        if image.size != (resized_width, resized_height):
+            image = image.resize((resized_width, resized_height))
+        return pil_to_base64(image)
+
+
+def _gui_owl_smart_resize(height: int, width: int) -> tuple[int, int]:
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError("GUI-Owl image aspect ratio must be at most 200.")
+
+    def _round_to_factor(value: float) -> int:
+        return round(value / _GUI_OWL_IMAGE_FACTOR) * _GUI_OWL_IMAGE_FACTOR
+
+    resized_height = max(_GUI_OWL_IMAGE_FACTOR, _round_to_factor(height))
+    resized_width = max(_GUI_OWL_IMAGE_FACTOR, _round_to_factor(width))
+    pixels = resized_height * resized_width
+    if pixels > _GUI_OWL_IMAGE_MAX_PIXELS:
+        beta = math.sqrt((height * width) / _GUI_OWL_IMAGE_MAX_PIXELS)
+        resized_height = (
+            math.floor(height / beta / _GUI_OWL_IMAGE_FACTOR) * _GUI_OWL_IMAGE_FACTOR
+        )
+        resized_width = (
+            math.floor(width / beta / _GUI_OWL_IMAGE_FACTOR) * _GUI_OWL_IMAGE_FACTOR
+        )
+    elif pixels < _GUI_OWL_IMAGE_MIN_PIXELS:
+        beta = math.sqrt(_GUI_OWL_IMAGE_MIN_PIXELS / (height * width))
+        resized_height = (
+            math.ceil(height * beta / _GUI_OWL_IMAGE_FACTOR) * _GUI_OWL_IMAGE_FACTOR
+        )
+        resized_width = (
+            math.ceil(width * beta / _GUI_OWL_IMAGE_FACTOR) * _GUI_OWL_IMAGE_FACTOR
+        )
+    return resized_height, resized_width
 
 
 def _general_e2e_observation_base64(observation: Observation, *, model_name: str) -> str:

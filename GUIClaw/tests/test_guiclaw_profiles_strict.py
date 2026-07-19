@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -14,6 +16,8 @@ from guiclaw.agent_profiles import (
     canonicalize_agent_profile,
     coordinate_mode_for_profile,
     normalize_profile_response_for_screen,
+    parse_profile_action,
+    profile_llm_defaults,
     profile_tool_definition,
     profile_uses_native_tools,
 )
@@ -103,6 +107,182 @@ def test_default_messages_use_native_opencua_contract(tmp_path: Path) -> None:
     assert messages[1]["role"] == "user"
     assert messages[1]["content"][0]["text"] == "Instruction: Open Settings"
     assert messages[1]["content"][-1]["type"] == "image_url"
+
+
+def test_gui_owl_messages_match_official_history_and_image_contract(tmp_path: Path) -> None:
+    observations = [
+        _observation(tmp_path / f"screen-{index}.png")
+        for index in range(7)
+    ]
+    history = [
+        SimpleNamespace(
+            observation=observations[index],
+            action_summary=f"Action {index + 1}",
+            tool_result_message={"content": f"tool result {index + 1}"},
+            raw_response_content=f"raw output {index + 1}",
+            assistant_message={"content": f"fallback output {index + 1}"},
+        )
+        for index in range(6)
+    ]
+
+    messages = build_profile_messages(
+        "gui_owl",
+        task="Open Settings",
+        current_observation=observations[-1],
+        history=history,
+        model_name="mPLUG/GUI-Owl-1.5-8B-Instruct",
+        history_image_window=1,
+    )
+
+    image_blocks = [
+        block
+        for message in messages
+        for block in message["content"]
+        if isinstance(message["content"], list) and block.get("type") == "image_url"
+    ]
+    assert len(image_blocks) == 5
+    first_prompt = messages[1]["content"][0]["text"]
+    assert "Today's date is:" in first_prompt
+    assert "Step 1: Action 1" in first_prompt
+    assert "Step 2: Action 2" in first_prompt
+    assert "Tool response:" not in first_prompt
+    assert "<tool_response>" not in str(messages)
+    assert [message["role"] for message in messages[2::2]] == ["assistant"] * 4
+    assert [message["content"][0]["text"] for message in messages[2::2]] == [
+        "raw output 3",
+        "raw output 4",
+        "raw output 5",
+        "raw output 6",
+    ]
+    assert all(
+        len(message["content"]) == 1 and message["content"][0]["type"] == "image_url"
+        for message in messages[3::2]
+    )
+
+
+def test_gui_owl_images_use_official_smart_resize(tmp_path: Path) -> None:
+    screenshot = tmp_path / "screen.png"
+    Image.new("RGB", (101, 203), "white").save(screenshot)
+    observation = Observation(
+        screenshot_path=str(screenshot),
+        screen_width=101,
+        screen_height=203,
+        foreground_app="Settings",
+        platform="android",
+    )
+
+    messages = build_profile_messages(
+        "gui_owl",
+        task="Open Settings",
+        current_observation=observation,
+        history=[],
+        model_name="mPLUG/GUI-Owl-1.5-8B-Instruct",
+        history_image_window=3,
+    )
+
+    data_url = messages[1]["content"][-1]["image_url"]["url"]
+    with Image.open(BytesIO(base64.b64decode(data_url.split(",", 1)[1]))) as image:
+        assert image.size == (112, 196)
+
+
+def test_legacy_gui_plus_prompt_uses_smart_resized_image_dimensions(tmp_path: Path) -> None:
+    screenshot = tmp_path / "screen.png"
+    Image.new("RGB", (101, 203), "white").save(screenshot)
+    observation = Observation(
+        screenshot_path=str(screenshot),
+        screen_width=101,
+        screen_height=203,
+        foreground_app="Settings",
+        platform="android",
+    )
+
+    legacy_messages = build_profile_messages(
+        "gui_owl",
+        task="Open Settings",
+        current_observation=observation,
+        history=[],
+        model_name="gui-plus",
+        history_image_window=3,
+    )
+    assert "The screen's resolution is 112x196." in legacy_messages[0]["content"]
+
+    for model_name in ("gui-plus-2026-02-26", "mPLUG/GUI-Owl-1.5-8B-Instruct"):
+        messages = build_profile_messages(
+            "gui_owl",
+            task="Open Settings",
+            current_observation=observation,
+            history=[],
+            model_name=model_name,
+            history_image_window=3,
+        )
+        assert "The screen's resolution is 1000x1000." in messages[0]["content"]
+
+
+def test_gui_owl_uses_1000_grid_with_bounds_and_raw_coordinate_metadata() -> None:
+    content = """
+Action: "Tap the center"
+<tool_call>
+{"name":"mobile_use","arguments":{"action":"click","coordinate":[500,1000]}}
+</tool_call>
+"""
+
+    payload = parse_profile_action(
+        "gui_owl",
+        content,
+        screen_width=1080,
+        screen_height=1920,
+    )
+
+    assert payload["x"] == 540
+    assert payload["y"] == 1919
+    assert payload["params"]["gui_owl_coordinates"] == {"coordinate": [500, 1000]}
+
+    invalid = content.replace("[500,1000]", "[500,1001]")
+    with pytest.raises(ValueError, match=r"\[0, 1000\]"):
+        parse_profile_action(
+            "gui_owl",
+            invalid,
+            screen_width=1080,
+            screen_height=1920,
+        )
+
+
+def test_legacy_gui_plus_maps_smart_resized_pixels_to_device_screen() -> None:
+    content = """
+<tool_call>
+{"name":"mobile_use","arguments":{"action":"swipe","coordinate":[543,2018],"coordinate2":[567,905]}}
+</tool_call>
+"""
+
+    payload = parse_profile_action(
+        "gui_owl",
+        content,
+        screen_width=1440,
+        screen_height=3120,
+        model_name="gui-plus",
+    )
+
+    assert payload["action_type"] == "drag"
+    assert (payload["x"], payload["y"]) == (548, 2026)
+    assert (payload["x2"], payload["y2"]) == (572, 908)
+    assert payload["params"]["gui_owl_coordinates"] == {
+        "coordinate": [543, 2018],
+        "coordinate2": [567, 905],
+    }
+
+    for model_name in ("gui-plus-2026-02-26", "mPLUG/GUI-Owl-1.5-8B-Instruct"):
+        with pytest.raises(ValueError, match=r"\[0, 1000\]"):
+            parse_profile_action(
+                "gui_owl",
+                content,
+                screen_width=1440,
+                screen_height=3120,
+                model_name=model_name,
+            )
+
+
+def test_gui_owl_keeps_2048_step_output_limit() -> None:
+    assert profile_llm_defaults("gui_owl") == {"max_tokens": 2048}
 
 
 def test_default_messages_include_platform_and_foreground_app(tmp_path: Path) -> None:
