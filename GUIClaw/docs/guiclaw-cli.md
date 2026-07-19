@@ -204,13 +204,16 @@ sections are rejected when they affect a supported field.
 | `provider.base_url` | required | OpenAI-compatible API base URL. |
 | `provider.model` | required | Vision model identifier. |
 | `provider.api_key` | `OPENAI_API_KEY` | Optional inline key; the environment variable is used when omitted. |
+| `provider.temperature` | server default | Optional sampling temperature. |
+| `provider.top_p` | server default | Optional nucleus-sampling value in `(0, 1]`. |
+| `provider.vl_high_resolution_images` | automatic | Optional provider-specific high-resolution image request. Supported endpoints are detected automatically. |
 | `embedding` | omitted | Optional OpenAI-compatible embedding endpoint. |
 | `embedding.base_url` | required when `embedding` is set | Embedding API base URL. |
 | `embedding.model` | required when `embedding` is set | Embedding model identifier. |
 | `embedding.api_key` | provider key | Separate embedding key. |
 | `max_steps` | `15` | Maximum GUI decision steps. Must be positive. |
 | `stagnation_limit` | `0` | Repeated-screen limit; `0` disables the detector. |
-| `image_scale_ratio` | `0.5` | Screenshot scale in `(0, 1]` for model and validation calls. |
+| `image_scale_ratio` | `0.5` | Screenshot scale in `(0, 1]` for model and validation calls. Some profiles apply their own preprocessing. |
 | `agent_profile` | `default` | Prompt and action contract. |
 | `memory_dir` | `~/.guiclaw/memory` | Policy and extracted-memory storage. Retrieval additionally requires `embedding`. |
 | `skills_dir` | `~/.guiclaw/skill` | Flat skill store for online reuse and extraction. |
@@ -219,6 +222,7 @@ sections are rejected when they affect a supported field.
 | `enable_memory_extraction` | `false` | Extract durable GUI memory after each run. |
 | `adb.serial` | ADB-selected device | Android device serial. |
 | `adb.adb_path` | `adb` | ADB executable. |
+| `adb.capture_source` | `auto` | `auto`, `scrcpy`, or `screencap`. `auto` uses a fresh ADB screencap for `gui_owl` and scrcpy for other profiles. |
 | `scrcpy.max_fps` | `12` | Maximum scrcpy stream frame rate. |
 | `scrcpy.jpeg_quality` | `80` | JPEG quality for streamed frames. |
 | `scrcpy.frame_timeout_ms` | `3000` | Frame wait timeout. |
@@ -226,6 +230,10 @@ sections are rejected when they affect a supported field.
 | `ios.wda_url` | `http://localhost:8100` | WebDriverAgent endpoint. |
 | `hdc.serial` | HDC-selected device | HarmonyOS device serial. |
 | `hdc.hdc_path` | `hdc` | HDC executable. |
+
+See [Model and provider compatibility](model-providers.md) for tested profiles,
+coordinate contracts, provider-specific request fields, and deployment
+examples.
 
 Example with skill reuse and post-run learning enabled:
 
@@ -284,6 +292,7 @@ must refer to a configured nanobot provider and a multimodal model.
     "provider": "custom",
     "model": "your-vision-model",
     "agentProfile": "default",
+    "adb": { "captureSource": "auto" },
     "maxSteps": 15,
     "enableSkillExecution": true,
     "enablePromptSkillSelection": true,
@@ -309,6 +318,7 @@ Both camelCase and snake_case keys are accepted.
 | `backend` | `adb` |
 | `model`, `provider` | host-selected when unset |
 | `agentProfile` | `default` when unset |
+| `adb.captureSource` | `auto`; fresh screencap for `gui_owl`, scrcpy otherwise |
 | `artifactsDir` | `gui_runs` → `~/.guiclaw/gui_runs` |
 | `shortcutCacheDir` | `shortcut_cache` → `~/.guiclaw/shortcut_cache` |
 | `maxSteps` | `15` |
