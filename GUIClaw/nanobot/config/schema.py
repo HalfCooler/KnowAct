@@ -402,6 +402,7 @@ class AdbConfig(Base):
     """ADB backend configuration for GUI automation."""
 
     serial: str | None = None
+    capture_source: Literal["auto", "scrcpy", "screencap"] = "auto"
 
 
 class ScrcpyConfig(Base):

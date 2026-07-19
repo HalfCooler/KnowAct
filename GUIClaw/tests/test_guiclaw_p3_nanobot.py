@@ -420,6 +420,7 @@ def test_gui_config_defaults() -> None:
 
     assert config.backend == "adb"
     assert config.adb.serial is None
+    assert config.adb.capture_source == "auto"
     assert config.ios.wda_url == "http://localhost:8100"
     assert config.artifacts_dir == "gui_runs"
     assert config.shortcut_cache_dir == "shortcut_cache"
@@ -437,6 +438,7 @@ def test_gui_config_validation() -> None:
     assert GuiConfig(agent_profile="default").agent_profile == "default"
     assert GuiConfig(agent_profile="gui_owl").agent_profile == "gui_owl"
     assert GuiConfig(agent_profile="qwen3vl").agent_profile == "qwen3vl"
+    assert GuiConfig(adb={"captureSource": "screencap"}).adb.capture_source == "screencap"
     with pytest.raises(ValidationError, match="Unsupported agent profile"):
         GuiConfig(agent_profile="mobileworld_general_e2e_compact_skill")
     assert GuiConfig.model_validate({"agentProfile": "gelab"}).agent_profile == "gelab"
@@ -454,6 +456,8 @@ def test_gui_config_validation() -> None:
         GuiConfig(image_scale_ratio=0)
     with pytest.raises(ValidationError):
         GuiConfig(image_scale_ratio=1.2)
+    with pytest.raises(ValidationError):
+        GuiConfig(adb={"captureSource": "invalid"})
 
 
 def test_config_gui_none_by_default() -> None:

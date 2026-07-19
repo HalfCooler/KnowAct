@@ -18,6 +18,7 @@ import litellm
 import numpy as np
 
 from guiclaw.agent import GuiAgent
+from guiclaw.agent_profiles import resolve_adb_capture_source
 from guiclaw.interfaces import InterventionHandler, InterventionRequest, InterventionResolution
 from guiclaw.paths import resolve_guiclaw_data_dir
 from guiclaw.postprocessing import EvaluationConfig, PostRunProcessor
@@ -2048,6 +2049,13 @@ class GuiSubagentTool(Tool):
 
             return AdbBackend(
                 serial=self._gui_config.adb.serial,
+                use_scrcpy=(
+                    resolve_adb_capture_source(
+                        self._gui_config.adb.capture_source,
+                        self._gui_config.agent_profile,
+                    )
+                    == "scrcpy"
+                ),
                 scrcpy_max_fps=self._gui_config.scrcpy.max_fps,
                 scrcpy_jpeg_quality=self._gui_config.scrcpy.jpeg_quality,
                 scrcpy_frame_timeout_ms=self._gui_config.scrcpy.frame_timeout_ms,

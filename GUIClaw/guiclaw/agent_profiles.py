@@ -15,6 +15,7 @@ from guiclaw.agents.profiles import (
     profile_tool_definition,
     profile_uses_native_tools,
     prompt_contract_for_profile,
+    resolve_adb_capture_source,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "profile_tool_definition",
     "profile_uses_native_tools",
     "prompt_contract_for_profile",
+    "resolve_adb_capture_source",
 ]

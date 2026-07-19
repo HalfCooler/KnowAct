@@ -9,10 +9,11 @@ import json
 import logging
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import json_repair
 import numpy as np
@@ -20,7 +21,7 @@ import yaml
 from openai import AsyncOpenAI
 
 from guiclaw.agent import AgentResult, GuiAgent
-from guiclaw.agent_profiles import SUPPORTED_AGENT_PROFILES
+from guiclaw.agent_profiles import SUPPORTED_AGENT_PROFILES, resolve_adb_capture_source
 from guiclaw.backends.adb import AdbBackend
 from guiclaw.backends.dry_run import DryRunBackend
 from guiclaw.interfaces import (
@@ -67,6 +68,9 @@ class ProviderConfig:
     base_url: str
     model: str
     api_key: str | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    vl_high_resolution_images: bool | None = None
 
 
 @dataclass(slots=True)
@@ -80,6 +84,7 @@ class EmbeddingConfig:
 class AdbConfig:
     serial: str | None = None
     adb_path: str = "adb"
+    capture_source: str = "auto"
 
 
 @dataclass(slots=True)
@@ -134,8 +139,21 @@ class CliConfig:
 class OpenAICompatibleLLMProvider:
     """OpenAI-compatible chat bridge that satisfies guiclaw's LLM protocol."""
 
-    def __init__(self, *, base_url: str, model: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        api_key: str | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        vl_high_resolution_images: bool | None = None,
+    ) -> None:
+        self._base_url = base_url
         self._model = model
+        self._temperature = temperature
+        self._top_p = top_p
+        self._vl_high_resolution_images = vl_high_resolution_images
         self._client = AsyncOpenAI(
             api_key=api_key or "no-key",
             base_url=base_url,
@@ -149,8 +167,9 @@ class OpenAICompatibleLLMProvider:
         model: str | None = None,
         max_tokens: int | None = None,
     ) -> LLMResponse:
+        effective_model = model or self._model
         kwargs: dict[str, Any] = {
-            "model": model or self._model,
+            "model": effective_model,
             "messages": _sanitize_messages(messages),
         }
         if tools:
@@ -158,6 +177,15 @@ class OpenAICompatibleLLMProvider:
             kwargs["tool_choice"] = tool_choice or "auto"
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
+        if self._top_p is not None:
+            kwargs["top_p"] = self._top_p
+        high_resolution = self._vl_high_resolution_images
+        if high_resolution is None:
+            high_resolution = _is_dashscope_gui_plus(self._base_url, effective_model)
+        if high_resolution:
+            kwargs["extra_body"] = {"vl_high_resolution_images": True}
 
         response = await self._client.chat.completions.create(**kwargs)
         if not response.choices:
@@ -341,10 +369,18 @@ def load_config(path: Path | None = None) -> CliConfig:
 
     provider_raw = _require_mapping(raw, "provider")
     provider_api_key = _optional_string(provider_raw, "api_key") or os.getenv("OPENAI_API_KEY")
+    high_resolution_raw = provider_raw.get("vl_high_resolution_images")
     provider = ProviderConfig(
         base_url=_require_string(provider_raw, "base_url"),
         model=_require_string(provider_raw, "model"),
         api_key=provider_api_key,
+        temperature=_coerce_optional_temperature(provider_raw.get("temperature")),
+        top_p=_coerce_optional_top_p(provider_raw.get("top_p")),
+        vl_high_resolution_images=(
+            None
+            if high_resolution_raw is None
+            else _coerce_bool(high_resolution_raw, default=False)
+        ),
     )
 
     embedding_raw = raw.get("embedding")
@@ -364,6 +400,7 @@ def load_config(path: Path | None = None) -> CliConfig:
     adb = AdbConfig(
         serial=_optional_string(adb_raw, "serial"),
         adb_path=_optional_string(adb_raw, "adb_path") or "adb",
+        capture_source=_coerce_capture_source(adb_raw.get("capture_source")),
     )
 
     scrcpy_raw = raw.get("scrcpy") or {}
@@ -417,6 +454,13 @@ def build_backend(name: str, config: CliConfig) -> Any:
             "adb_path": config.adb.adb_path or "adb",
         }
         extra_kwargs = {
+            "use_scrcpy": (
+                resolve_adb_capture_source(
+                    config.adb.capture_source,
+                    config.agent_profile,
+                )
+                == "scrcpy"
+            ),
             "scrcpy_max_fps": config.scrcpy.max_fps,
             "scrcpy_jpeg_quality": config.scrcpy.jpeg_quality,
             "scrcpy_frame_timeout_ms": config.scrcpy.frame_timeout_ms,
@@ -597,11 +641,19 @@ async def _execute_agent(
 async def run_cli(args: argparse.Namespace) -> AgentResult:
     task = resolve_task(args)
     config = load_config(args.config)
-    backend = build_backend(resolve_backend_name(args), config)
+    backend_config = (
+        replace(config, agent_profile=args.agent_profile)
+        if args.agent_profile is not None
+        else config
+    )
+    backend = build_backend(resolve_backend_name(args), backend_config)
     provider = OpenAICompatibleLLMProvider(
         base_url=config.provider.base_url,
         model=config.provider.model,
         api_key=config.provider.api_key,
+        temperature=config.provider.temperature,
+        top_p=config.provider.top_p,
+        vl_high_resolution_images=config.provider.vl_high_resolution_images,
     )
 
     if getattr(args, "background", False):
@@ -898,12 +950,51 @@ def _coerce_image_scale_ratio(value: Any, *, default: float) -> float:
     return parsed
 
 
+def _coerce_optional_temperature(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Expected temperature >= 0, got {value!r}") from exc
+    if parsed < 0:
+        raise ValueError(f"Expected temperature >= 0, got {value!r}")
+    return parsed
+
+
+def _coerce_optional_top_p(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Expected top_p in (0, 1], got {value!r}") from exc
+    if not 0 < parsed <= 1:
+        raise ValueError(f"Expected top_p in (0, 1], got {value!r}")
+    return parsed
+
+
+def _coerce_capture_source(value: Any) -> str:
+    source = str(value or "auto").strip().lower()
+    resolve_adb_capture_source(source, None)
+    return source
+
+
 def _coerce_bool(value: Any, *, default: bool) -> bool:
     if value is None:
         return default
     if not isinstance(value, bool):
         raise ValueError(f"Expected boolean, got {value!r}")
     return value
+
+
+def _is_dashscope_gui_plus(base_url: str, model: str) -> bool:
+    host = (urlparse(base_url).hostname or "").lower()
+    is_dashscope = host.endswith(".aliyuncs.com") and any(
+        label.startswith("dashscope") or label == "maas" for label in host.split(".")
+    )
+    model_name = model.rsplit("/", 1)[-1].strip().lower()
+    return is_dashscope and (model_name == "gui-plus" or model_name.startswith("gui-plus-"))
 
 
 if __name__ == "__main__":

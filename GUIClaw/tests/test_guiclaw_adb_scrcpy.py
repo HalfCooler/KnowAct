@@ -697,6 +697,43 @@ def test_cli_builds_adb_backend_with_scrcpy_capture_config() -> None:
     assert backend._frame_source._frame_timeout_ms == 1200  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    ("capture_source", "agent_profile", "expected_use_scrcpy"),
+    [
+        ("auto", None, True),
+        ("auto", "gui_owl", False),
+        ("scrcpy", "gui_owl", True),
+        ("screencap", None, False),
+    ],
+)
+def test_cli_resolves_adb_capture_source(
+    capture_source: str,
+    agent_profile: str | None,
+    expected_use_scrcpy: bool,
+) -> None:
+    config = cli.CliConfig(
+        provider=cli.ProviderConfig(base_url="http://localhost:1/v1", model="m"),
+        adb=cli.AdbConfig(capture_source=capture_source),
+        agent_profile=agent_profile,
+    )
+
+    backend = cli.build_backend("adb", config)
+
+    assert backend._use_scrcpy is expected_use_scrcpy
+
+
+def test_nanobot_gui_owl_auto_capture_uses_fresh_screencaps() -> None:
+    from nanobot.agent.tools.gui import GuiSubagentTool
+
+    tool = GuiSubagentTool.__new__(GuiSubagentTool)
+    tool._gui_config = GuiConfig(agent_profile="gui_owl")
+    tool._gui_frame_callback = None
+
+    backend = tool._build_backend("adb")
+
+    assert backend._use_scrcpy is False
+
+
 def test_scrcpy_numpy_frames_are_converted_from_bgr_to_rgb() -> None:
     np = pytest.importorskip("numpy")
     frame = np.array([[[0, 0, 255]]], dtype=np.uint8)

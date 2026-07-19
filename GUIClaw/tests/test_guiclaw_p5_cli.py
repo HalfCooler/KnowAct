@@ -193,6 +193,10 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert cfg.provider.base_url == "http://localhost:1234/v1"
     assert cfg.provider.model == "qwen-gui"
     assert cfg.provider.api_key == "env-key"
+    assert cfg.provider.temperature is None
+    assert cfg.provider.top_p is None
+    assert cfg.provider.vl_high_resolution_images is None
+    assert cfg.adb.capture_source == "auto"
     assert cfg.image_scale_ratio == pytest.approx(0.5)
     assert cfg.stagnation_limit == 0
     assert cfg.enable_skill_execution is False
@@ -206,17 +210,25 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
           base_url: http://localhost:9999/v1
           model: qwen-custom
           api_key: inline-key
+          temperature: 0.2
+          top_p: 0.8
+          vl_high_resolution_images: true
         adb:
           serial: emulator-5554
           adb_path: /tmp/adb
+          capture_source: screencap
         """,
     )
     override = cli.load_config(custom_config)
     assert override.provider.base_url == "http://localhost:9999/v1"
     assert override.provider.model == "qwen-custom"
     assert override.provider.api_key == "inline-key"
+    assert override.provider.temperature == pytest.approx(0.2)
+    assert override.provider.top_p == pytest.approx(0.8)
+    assert override.provider.vl_high_resolution_images is True
     assert override.adb.serial == "emulator-5554"
     assert override.adb.adb_path == "/tmp/adb"
+    assert override.adb.capture_source == "screencap"
 
     scaled_config = _write_config(
         tmp_path / "scaled.yaml",
@@ -237,6 +249,135 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert scaled.enable_skill_execution is True
     assert scaled.enable_skill_extraction is True
     assert scaled.enable_memory_extraction is True
+
+
+@pytest.mark.parametrize("field,value", [("temperature", -0.1), ("top_p", 0), ("top_p", 1.1)])
+def test_load_config_rejects_invalid_sampling_values(
+    field: str,
+    value: float,
+    tmp_path: Path,
+) -> None:
+    import guiclaw.cli as cli
+
+    config = _write_config(
+        tmp_path / f"{field}.yaml",
+        f"""
+        provider:
+          base_url: http://localhost:9999/v1
+          model: gui-owl
+          {field}: {value}
+        """,
+    )
+
+    with pytest.raises(ValueError, match=field):
+        cli.load_config(config)
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_forwards_optional_sampling_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import guiclaw.cli as cli
+
+    captured: dict[str, Any] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="ok", tool_calls=None)
+                    )
+                ],
+                usage=None,
+            )
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+            self.chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(cli, "AsyncOpenAI", FakeAsyncOpenAI)
+    provider = cli.OpenAICompatibleLLMProvider(
+        base_url="http://localhost:8000/v1",
+        model="gui-owl",
+        temperature=0.2,
+        top_p=0.8,
+    )
+
+    await provider.chat([{"role": "user", "content": "test"}])
+
+    assert captured["temperature"] == pytest.approx(0.2)
+    assert captured["top_p"] == pytest.approx(0.8)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base_url", "model", "configured", "expects_high_resolution"),
+    [
+        (
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "gui-plus",
+            None,
+            True,
+        ),
+        (
+            "https://example-cn-beijing.dashscope.aliyuncs.com/compatible-mode/v1",
+            "gui-plus-2026-02-26",
+            None,
+            True,
+        ),
+        ("http://localhost:8000/v1", "mPLUG/GUI-Owl-1.5-8B-Instruct", None, False),
+        (
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "gui-plus",
+            False,
+            False,
+        ),
+    ],
+)
+async def test_openai_provider_configures_dashscope_gui_plus_high_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    base_url: str,
+    model: str,
+    configured: bool | None,
+    expects_high_resolution: bool,
+) -> None:
+    import guiclaw.cli as cli
+
+    captured: dict[str, Any] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="ok", tool_calls=None)
+                    )
+                ],
+                usage=None,
+            )
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+            self.chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(cli, "AsyncOpenAI", FakeAsyncOpenAI)
+    provider = cli.OpenAICompatibleLLMProvider(
+        base_url=base_url,
+        model=model,
+        vl_high_resolution_images=configured,
+    )
+
+    await provider.chat([{"role": "user", "content": "test"}])
+
+    if expects_high_resolution:
+        assert captured["extra_body"] == {"vl_high_resolution_images": True}
+    else:
+        assert "extra_body" not in captured
 
 
 def test_build_backend_variants(monkeypatch: pytest.MonkeyPatch) -> None:
