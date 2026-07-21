@@ -11,7 +11,7 @@ Lychee Team, Harbin Institute of Technology, Shenzhen
 </p>
 
 <p align="center">
-  GUI automation for desktop, Android, iOS, and HarmonyOS.
+  Personal Assistant for desktop, Android, iOS, and HarmonyOS.
 </p>
 
 <p align="center">
@@ -25,7 +25,7 @@ Lychee Team, Harbin Institute of Technology, Shenzhen
 
 
 
-You can see the experimental logs and trajectories at [here](https://github.com/HITsz-TMG/KnowAct/releases/tag/Result) 
+You can see the real-device experimental logs and trajectories at [here](https://github.com/HITsz-TMG/KnowAct/releases/tag/Result) 
 
 ![KnowAct-GUIClaw results overview](GUIClaw/assets/front.png)
 
@@ -310,7 +310,8 @@ If you use KnowAct-GUIClaw in research, please cite:
 
 ## Wechat
 
-<img width="1216" height="1105" alt="91e235be22096e355c1f3be4af5033d3" src="https://github.com/user-attachments/assets/6c64fd4e-8c2b-4048-8e64-281d1489f38a" />
+<img width="1211" height="1383" alt="6ecafff52f584a37978ae546161ae0f8" src="https://github.com/user-attachments/assets/3186388d-9680-4358-a6f0-401f364bc0f9" />
+
 
 
 ## Acknowledgements
