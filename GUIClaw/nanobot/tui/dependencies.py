@@ -12,11 +12,12 @@ from guiclaw.paths import resolve_guiclaw_data_dir
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.tools.gui import GuiSubagentTool
 from nanobot.bus.queue import MessageBus
-from nanobot.cli.commands import _load_runtime_config, _make_provider, _resolve_gui_runtime
+from nanobot.cli.commands import _load_runtime_config
 from nanobot.config.loader import load_config
 from nanobot.config.paths import get_cron_dir
-from nanobot.config.schema import Config
+from nanobot.config.schema import Config, ModelPresetConfig
 from nanobot.cron.service import CronService
+from nanobot.providers.factory import make_provider
 from nanobot.session.manager import SessionManager
 from nanobot.tui.contracts import (
     RuntimeInspectionContract,
@@ -49,6 +50,33 @@ def _resolve_runtime_config(request: Request | None = None) -> Config:
         if isinstance(config, Config):
             return config
     return _load_runtime_config()
+
+
+def _resolve_gui_runtime(
+    config: Config,
+    *,
+    host_provider: Any | None = None,
+) -> tuple[Any | None, str | None]:
+    gui_config = config.gui
+    if gui_config is None:
+        return None, None
+
+    resolved = config.resolve_preset()
+    gui_model = gui_config.model or resolved.model
+    gui_provider_name = gui_config.provider
+    inherited_provider = gui_provider_name in (None, "auto", resolved.provider)
+    if gui_model == resolved.model and inherited_provider:
+        return host_provider or make_provider(config), gui_model
+
+    gui_preset = ModelPresetConfig(
+        model=gui_model,
+        provider=gui_provider_name or resolved.provider,
+        max_tokens=resolved.max_tokens,
+        context_window_tokens=resolved.context_window_tokens,
+        temperature=resolved.temperature,
+        reasoning_effort=resolved.reasoning_effort,
+    )
+    return make_provider(config, preset=gui_preset), gui_model
 
 
 def get_session_contract(
@@ -164,7 +192,13 @@ def get_task_launch_service(request: Request) -> TaskLaunchService:
     registry = get_operations_registry(request)
 
     gui_config = config.gui
-    gui_provider, gui_model = _resolve_gui_runtime(config) if gui_config is not None else (None, None)
+    host_provider = make_provider(config)
+    host_model = config.resolve_preset().model
+    gui_provider, gui_model = (
+        _resolve_gui_runtime(config, host_provider=host_provider)
+        if gui_config is not None
+        else (None, None)
+    )
 
     def _gui_tool() -> Any:
         if gui_config is None or gui_provider is None or gui_model is None:
@@ -174,6 +208,8 @@ def get_task_launch_service(request: Request) -> TaskLaunchService:
             provider=gui_provider,
             model=gui_model,
             workspace=config.workspace_path,
+            postprocess_provider=host_provider,
+            postprocess_model=host_model,
         )
 
     async def _nanobot_runner(payload: Any) -> dict[str, Any]:
@@ -219,28 +255,13 @@ def get_chat_runtime_factory(
     shared_sessions = session_manager or SessionManager(resolved_config.workspace_path)
 
     def _factory() -> AgentLoop:
-        provider = _make_provider(resolved_config)
-        gui_provider, gui_model = _resolve_gui_runtime(resolved_config)
         cron_store_path = get_cron_dir() / "jobs.json"
         cron = CronService(cron_store_path)
-        return AgentLoop(
+        return AgentLoop.from_config(
+            resolved_config,
             bus=MessageBus(),
-            provider=provider,
-            workspace=resolved_config.workspace_path,
-            model=resolved_config.agents.defaults.model,
-            max_iterations=resolved_config.agents.defaults.max_tool_iterations,
-            context_window_tokens=resolved_config.agents.defaults.context_window_tokens,
-            web_search_config=resolved_config.tools.web.search,
-            web_proxy=resolved_config.tools.web.proxy or None,
-            exec_config=resolved_config.tools.exec,
             cron_service=cron,
-            restrict_to_workspace=resolved_config.tools.restrict_to_workspace,
             session_manager=shared_sessions,
-            mcp_servers=resolved_config.tools.mcp_servers,
-            channels_config=resolved_config.channels,
-            gui_config=resolved_config.gui,
-            gui_provider=gui_provider,
-            gui_model=gui_model,
         )
 
     return _factory

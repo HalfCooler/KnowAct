@@ -1250,6 +1250,8 @@ class GuiSubagentTool(Tool):
         provider: "LLMProvider",
         model: str,
         workspace: Path,
+        postprocess_provider: "LLMProvider | None" = None,
+        postprocess_model: str | None = None,
         gui_event_callback: Any | None = None,
         gui_frame_callback: Any | None = None,
     ) -> None:
@@ -1266,6 +1268,10 @@ class GuiSubagentTool(Tool):
             provider,
             model,
             capture_ttft=gui_config.capture_ttft,
+        )
+        self._postprocess_llm_adapter = NanobotLLMAdapter(
+            postprocess_provider or provider,
+            postprocess_model or model,
         )
         self._embedding_signature: str | None = self._resolve_embedding_signature()
         self._embedding_adapter = (
@@ -1286,8 +1292,8 @@ class GuiSubagentTool(Tool):
             else None
         )
         self._postprocessor = PostRunProcessor(
-            llm=self._llm_adapter,
-            merge_llm=self._llm_adapter,
+            llm=self._postprocess_llm_adapter,
+            merge_llm=self._postprocess_llm_adapter,
             embedding_provider=self._embedding_adapter,
             embedding_signature=self._embedding_signature,
             skill_store_root=get_gui_skill_store_root(self._workspace),

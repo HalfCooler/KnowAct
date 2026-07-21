@@ -251,6 +251,40 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert scaled.enable_memory_extraction is True
 
 
+def test_load_config_supports_postprocess_provider_and_evaluation(tmp_path: Path) -> None:
+    import guiclaw.cli as cli
+
+    config_path = _write_config(
+        tmp_path / "postprocess.yaml",
+        """
+        provider:
+          base_url: https://gui.example/v1
+          model: gui-plus
+          api_key: gui-key
+        postprocess_provider:
+          base_url: https://general.example/v1
+          model: qwen-plus
+          api_key: general-key
+          temperature: 0.1
+        evaluation:
+          enabled: true
+          judge_model: qwen3-vl-plus
+        """,
+    )
+
+    config = cli.load_config(config_path)
+
+    assert config.postprocess_provider is not None
+    assert config.postprocess_provider.base_url == "https://general.example/v1"
+    assert config.postprocess_provider.model == "qwen-plus"
+    assert config.postprocess_provider.api_key == "general-key"
+    assert config.postprocess_provider.temperature == pytest.approx(0.1)
+    assert config.evaluation.enabled is True
+    assert config.evaluation.judge_model == "qwen3-vl-plus"
+    assert config.evaluation.api_key == "general-key"
+    assert config.evaluation.api_base == "https://general.example/v1"
+
+
 @pytest.mark.parametrize("field,value", [("temperature", -0.1), ("top_p", 0), ("top_p", 1.1)])
 def test_load_config_rejects_invalid_sampling_values(
     field: str,
@@ -514,6 +548,11 @@ def test_standalone_cli_runs_enabled_postprocessing_before_return(
             model="embed-model",
             api_key="embed-key",
         ),
+        postprocess_provider=cli.ProviderConfig(
+            base_url="http://localhost:9012/v1",
+            model="qwen-general",
+            api_key="general-key",
+        ),
         memory_dir=tmp_path / "memory",
         skills_dir=tmp_path / "skill",
         enable_skill_execution=True,
@@ -522,6 +561,7 @@ def test_standalone_cli_runs_enabled_postprocessing_before_return(
     )
     backend = _FakeBackend(platform="android")
     provider = object()
+    postprocess_provider = object()
     embedding_provider = object()
     agent_state: dict[str, Any] = {}
     postprocess_state: dict[str, Any] = {}
@@ -573,6 +613,7 @@ def test_standalone_cli_runs_enabled_postprocessing_before_return(
         raising=False,
     )
     monkeypatch.setattr(cli, "build_optional_components", fake_build_optional_components)
+    monkeypatch.setattr(cli, "build_llm_provider", lambda _: postprocess_provider)
 
     result = asyncio.run(cli._execute_agent(args, config, backend, provider, "Open Contacts"))
 
@@ -580,14 +621,15 @@ def test_standalone_cli_runs_enabled_postprocessing_before_return(
     assert postprocess_state["components_embedding"] is embedding_provider
     assert agent_state["enable_prompt_skill_selection"] is True
     assert postprocess_state["init"] == {
-        "llm": provider,
-        "merge_llm": provider,
+        "llm": postprocess_provider,
+        "merge_llm": postprocess_provider,
         "embedding_provider": embedding_provider,
         "embedding_signature": "embed-model",
         "skill_store_root": config.skills_dir,
         "enable_skill_extraction": True,
         "enable_memory_extraction": True,
         "memory_bank_path": config.memory_dir / "gui_memory_bank.jsonl",
+        "evaluation": config.evaluation,
     }
     assert postprocess_state["schedule"] == {
         "trace_path": agent_state["trajectory_recorder"].path,

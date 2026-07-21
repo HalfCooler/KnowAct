@@ -283,6 +283,28 @@ def test_agent_loop_registers_gui_tool_with_gui_runtime_override(tmp_workspace: 
     kwargs = mock_gui_tool.call_args.kwargs
     assert kwargs["provider"] is gui_provider
     assert kwargs["model"] == "gui-model"
+    assert kwargs["postprocess_provider"] is main_provider
+    assert kwargs["postprocess_model"] == "main-model"
+
+
+def test_gui_tool_routes_postprocessing_to_host_provider(tmp_workspace: Path) -> None:
+    from nanobot.agent.tools.gui import GuiSubagentTool
+
+    gui_provider = _MockNanobotProvider([])
+    host_provider = _MockNanobotProvider([])
+    tool = GuiSubagentTool(
+        gui_config=Config(gui={"backend": "dry-run"}).gui,
+        provider=gui_provider,
+        model="gui-model",
+        workspace=tmp_workspace,
+        postprocess_provider=host_provider,
+        postprocess_model="host-model",
+    )
+
+    assert tool._llm_adapter._provider is gui_provider
+    assert tool._llm_adapter._model == "gui-model"
+    assert tool._postprocessor._llm._provider is host_provider
+    assert tool._postprocessor._llm._model == "host-model"
 
 
 @pytest.mark.asyncio

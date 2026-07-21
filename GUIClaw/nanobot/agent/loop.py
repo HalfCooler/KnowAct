@@ -646,6 +646,8 @@ class AgentLoop:
                     provider=self._gui_provider or self.provider,
                     model=self._gui_model or self.model,
                     workspace=self.workspace,
+                    postprocess_provider=self.provider,
+                    postprocess_model=self.model,
                     gui_event_callback=self._gui_event_callback,
                     gui_frame_callback=self._gui_frame_callback,
                 )

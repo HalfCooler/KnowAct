@@ -35,7 +35,7 @@ from guiclaw.memory.policy import load_policy_context
 from guiclaw.memory.retrieval import MemoryRetriever
 from guiclaw.memory.store import MemoryStore
 from guiclaw.paths import DEFAULT_GUI_RUNS_DIR
-from guiclaw.postprocessing import PostRunProcessor
+from guiclaw.postprocessing import EvaluationConfig, PostRunProcessor
 from guiclaw.skills import skills_supported_for_platform
 from guiclaw.skills.action_grounder import ActionGrounder as _AgentActionGrounder
 from guiclaw.skills.executor import LLMStateValidator, SkillExecutor
@@ -118,6 +118,7 @@ class BackgroundConfig:
 @dataclass(slots=True)
 class CliConfig:
     provider: ProviderConfig
+    postprocess_provider: ProviderConfig | None = None
     embedding: EmbeddingConfig | None = None
     adb: AdbConfig = field(default_factory=AdbConfig)
     scrcpy: ScrcpyConfig = field(default_factory=ScrcpyConfig)
@@ -131,6 +132,7 @@ class CliConfig:
     enable_skill_execution: bool = False
     enable_skill_extraction: bool = False
     enable_memory_extraction: bool = False
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     agent_profile: str | None = None
     background: bool = False
     background_config: BackgroundConfig = field(default_factory=BackgroundConfig)
@@ -245,6 +247,17 @@ class OpenAICompatibleEmbeddingProvider:
             )
             vectors.extend(item.embedding for item in response.data)
         return np.array(vectors, dtype=np.float32)
+
+
+def build_llm_provider(config: ProviderConfig) -> OpenAICompatibleLLMProvider:
+    return OpenAICompatibleLLMProvider(
+        base_url=config.base_url,
+        model=config.model,
+        api_key=config.api_key,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        vl_high_resolution_images=config.vl_high_resolution_images,
+    )
 
 
 def build_embedding_provider(
@@ -383,6 +396,29 @@ def load_config(path: Path | None = None) -> CliConfig:
         ),
     )
 
+    postprocess_raw = raw.get("postprocess_provider")
+    postprocess_provider: ProviderConfig | None = None
+    if postprocess_raw is not None:
+        if not isinstance(postprocess_raw, dict):
+            raise ValueError("postprocess_provider config must be a mapping")
+        postprocess_high_resolution = postprocess_raw.get("vl_high_resolution_images")
+        postprocess_provider = ProviderConfig(
+            base_url=_require_string(postprocess_raw, "base_url"),
+            model=_require_string(postprocess_raw, "model"),
+            api_key=(
+                _optional_string(postprocess_raw, "api_key")
+                or os.getenv("OPENAI_API_KEY")
+                or provider_api_key
+            ),
+            temperature=_coerce_optional_temperature(postprocess_raw.get("temperature")),
+            top_p=_coerce_optional_top_p(postprocess_raw.get("top_p")),
+            vl_high_resolution_images=(
+                None
+                if postprocess_high_resolution is None
+                else _coerce_bool(postprocess_high_resolution, default=False)
+            ),
+        )
+
     embedding_raw = raw.get("embedding")
     embedding: EmbeddingConfig | None = None
     if embedding_raw is not None:
@@ -428,8 +464,31 @@ def load_config(path: Path | None = None) -> CliConfig:
         hdc_path=_optional_string(hdc_raw, "hdc_path") or "hdc",
     )
 
+    evaluation_raw = raw.get("evaluation") or {}
+    if not isinstance(evaluation_raw, dict):
+        raise ValueError("evaluation config must be a mapping")
+    evaluation_provider = postprocess_provider or provider
+    evaluation = EvaluationConfig(
+        enabled=_coerce_bool(evaluation_raw.get("enabled"), default=False),
+        judge_model=(
+            _optional_string(evaluation_raw, "judge_model")
+            or _optional_string(evaluation_raw, "model")
+            or "qwen3-vl-plus"
+        ),
+        api_key=(
+            _optional_string(evaluation_raw, "api_key")
+            or evaluation_provider.api_key
+            or ""
+        ),
+        api_base=(
+            _optional_string(evaluation_raw, "api_base")
+            or evaluation_provider.base_url
+        ),
+    )
+
     return CliConfig(
         provider=provider,
+        postprocess_provider=postprocess_provider,
         embedding=embedding,
         adb=adb,
         scrcpy=scrcpy,
@@ -443,6 +502,7 @@ def load_config(path: Path | None = None) -> CliConfig:
         enable_skill_execution=_coerce_bool(raw.get("enable_skill_execution"), default=False),
         enable_skill_extraction=_coerce_bool(raw.get("enable_skill_extraction"), default=False),
         enable_memory_extraction=_coerce_bool(raw.get("enable_memory_extraction"), default=False),
+        evaluation=evaluation,
         agent_profile=_optional_string(raw, "agent_profile"),
     )
 
@@ -617,16 +677,22 @@ async def _execute_agent(
         stagnation_limit=config.stagnation_limit,
     )
     result = await agent.run(task)
-    if skill_extraction_enabled or config.enable_memory_extraction:
+    if skill_extraction_enabled or config.enable_memory_extraction or config.evaluation.enabled:
+        postprocess_provider = (
+            build_llm_provider(config.postprocess_provider)
+            if config.postprocess_provider is not None
+            else provider
+        )
         postprocessor = PostRunProcessor(
-            llm=provider,
-            merge_llm=provider,
+            llm=postprocess_provider,
+            merge_llm=postprocess_provider,
             embedding_provider=embedding_provider,
             embedding_signature=config.embedding.model if config.embedding else None,
             skill_store_root=config.skills_dir or DEFAULT_SKILLS_DIR,
             enable_skill_extraction=skill_extraction_enabled,
             enable_memory_extraction=config.enable_memory_extraction,
             memory_bank_path=(config.memory_dir or DEFAULT_MEMORY_DIR) / "gui_memory_bank.jsonl",
+            evaluation=config.evaluation,
         )
         postprocessor.schedule(
             recorder.path,
@@ -647,14 +713,7 @@ async def run_cli(args: argparse.Namespace) -> AgentResult:
         else config
     )
     backend = build_backend(resolve_backend_name(args), backend_config)
-    provider = OpenAICompatibleLLMProvider(
-        base_url=config.provider.base_url,
-        model=config.provider.model,
-        api_key=config.provider.api_key,
-        temperature=config.provider.temperature,
-        top_p=config.provider.top_p,
-        vl_high_resolution_images=config.provider.vl_high_resolution_images,
-    )
+    provider = build_llm_provider(config.provider)
 
     if getattr(args, "background", False):
         probe_fn = probe_isolated_background_support
