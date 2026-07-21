@@ -207,6 +207,10 @@ sections are rejected when they affect a supported field.
 | `provider.temperature` | server default | Optional sampling temperature. |
 | `provider.top_p` | server default | Optional nucleus-sampling value in `(0, 1]`. |
 | `provider.vl_high_resolution_images` | automatic | Optional provider-specific high-resolution image request. Supported endpoints are detected automatically. |
+| `postprocess_provider` | omitted | Optional OpenAI-compatible general model for summaries, memory extraction, skill extraction/evolution, and skill merging. When omitted, `provider` is reused. |
+| `postprocess_provider.base_url` | required when set | General-model API base URL. |
+| `postprocess_provider.model` | required when set | General model identifier. Use a multimodal model when skill extraction is enabled. |
+| `postprocess_provider.api_key` | `OPENAI_API_KEY`, then `provider.api_key` | Optional separate API key. |
 | `embedding` | omitted | Optional OpenAI-compatible embedding endpoint. |
 | `embedding.base_url` | required when `embedding` is set | Embedding API base URL. |
 | `embedding.model` | required when `embedding` is set | Embedding model identifier. |
@@ -220,6 +224,10 @@ sections are rejected when they affect a supported field.
 | `enable_skill_execution` | `false` | Retrieve skills and expose `use_skill` to the GUI agent. Uses BM25 without `embedding` and hybrid retrieval with it. |
 | `enable_skill_extraction` | `false` | Extract or evolve skills after each run. |
 | `enable_memory_extraction` | `false` | Extract durable GUI memory after each run. |
+| `evaluation.enabled` | `false` | Judge successful trajectories after the run. |
+| `evaluation.judge_model` | `qwen3-vl-plus` | Evaluation model identifier. `evaluation.model` is also accepted. |
+| `evaluation.api_key` | post-processing provider key | Optional evaluator API key. |
+| `evaluation.api_base` | post-processing provider URL | Optional evaluator API base URL. |
 | `adb.serial` | ADB-selected device | Android device serial. |
 | `adb.adb_path` | `adb` | ADB executable. |
 | `adb.capture_source` | `auto` | `auto`, `scrcpy`, or `screencap`. `auto` uses a fresh ADB screencap for `gui_owl` and scrcpy for other profiles. |
@@ -242,6 +250,10 @@ provider:
   base_url: "https://api.example.com/v1"
   model: "your-vision-model"
 
+postprocess_provider:
+  base_url: "https://api.example.com/v1"
+  model: "your-general-multimodal-model"
+
 embedding:
   base_url: "https://api.example.com/v1"
   model: "your-embedding-model"
@@ -252,12 +264,18 @@ agent_profile: default
 enable_skill_execution: true
 enable_skill_extraction: true
 enable_memory_extraction: true
+
+evaluation:
+  enabled: false
+  judge_model: "your-evaluator-model"
 ```
 
 The standalone CLI uses the memory retriever when `embedding` is configured.
 Skill execution also works without embeddings through BM25 keyword retrieval.
 When either extraction switch is enabled, the command reuses the same
 `PostRunProcessor` as the nanobot adapter and waits for it before returning.
+The GUI model remains responsible only for observation-to-action decisions;
+configured post-run work uses `postprocess_provider`.
 Skills are written to `skills_dir/skills.py`; memory is written to
 `memory_dir/gui_memory_bank.jsonl`.
 
@@ -339,6 +357,9 @@ Both camelCase and snake_case keys are accepted.
 When enabled, post-run extraction writes skills to
 `~/.guiclaw/skill/skills.py` and memory to
 `~/.guiclaw/memory/gui_memory_bank.jsonl`.
+Post-run summaries, memory, and skills use the host agent's general provider
+and model rather than a separately configured GUI-specialist model. The
+optional evaluator continues to use `gui.evaluation`.
 
 The adapter also uses the shared `POLICY` entries in
 `~/.guiclaw/memory/policy.md`; there is no separate nanobot policy setting.
@@ -485,6 +506,9 @@ extracted skills in `~/.guiclaw/skill/skills.py`.
 
 Relative `artifactsDir` and `shortcutCacheDir` values in nanobot configuration
 are resolved under `~/.guiclaw`. Absolute paths remain absolute.
+Each model-driven step in `traj.json` includes `inference_time_s`, measured as
+client-observed wall time around all model calls for that step. It excludes
+screenshot capture and GUI action execution.
 
 ## Calling GUIClaw from another agent
 

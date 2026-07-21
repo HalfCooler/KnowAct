@@ -52,6 +52,10 @@ provider:
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   model: "gui-plus"
 
+postprocess_provider:
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-plus"
+
 agent_profile: gui_owl
 adb:
   capture_source: auto
@@ -63,6 +67,12 @@ variable:
 ```bash
 export OPENAI_API_KEY="your-api-key"
 ```
+
+Keep text-heavy post-run work on a general model. In particular, compact skill
+extraction can request up to 8192 output tokens, while some GUI-specialist
+endpoints accept at most 2048. The nanobot adapter selects the host model for
+post-processing automatically; standalone CLI users should set
+`postprocess_provider` as shown above.
 
 For DashScope or MAAS endpoints under `aliyuncs.com`, GUIClaw automatically
 sends:
