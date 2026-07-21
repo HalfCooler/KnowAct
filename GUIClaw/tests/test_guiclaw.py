@@ -6,6 +6,7 @@ import copy
 import io
 import json
 import logging
+import time
 import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -3513,7 +3514,15 @@ async def test_root_available_propagates_timeout(
 
 
 @pytest.mark.asyncio
-async def test_agent_failure_keeps_last_trace_path(tmp_path: Path) -> None:
+async def test_agent_failure_keeps_last_trace_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inference_clock = iter((100.0, 101.25))
+    monkeypatch.setattr(
+        "guiclaw.agent.time",
+        SimpleNamespace(time=lambda: next(inference_clock), monotonic=time.monotonic),
+    )
     agent = GuiAgent(
         _ScriptedLLM(
             [
@@ -3547,6 +3556,8 @@ async def test_agent_failure_keeps_last_trace_path(tmp_path: Path) -> None:
     assert "Remaining:" in result.summary
     assert "Current:" in result.summary
     assert "Resume:" in result.summary
+    trajectory = json.loads((tmp_path / "traj" / "traj.json").read_text(encoding="utf-8"))
+    assert trajectory["steps"][0]["inference_time_s"] == 1.25
 
 
 @pytest.mark.asyncio
@@ -4064,7 +4075,16 @@ async def test_agent_records_attempt_exception_and_retry_events(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_agent_retries_profile_parse_error_three_times_within_step(tmp_path: Path) -> None:
+async def test_agent_retries_profile_parse_error_three_times_within_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inference_clock = iter((0.0, 0.25, 1.0, 1.25, 2.0, 2.25, 3.0, 3.25))
+    monkeypatch.setattr(
+        "guiclaw.agent.time",
+        SimpleNamespace(time=lambda: next(inference_clock), monotonic=time.monotonic),
+    )
+
     class _MalformedThenRecoverLLM:
         def __init__(self) -> None:
             self.calls = 0
@@ -4103,6 +4123,8 @@ async def test_agent_retries_profile_parse_error_three_times_within_step(tmp_pat
     assert llm.calls == 4
     assert recorder.path is not None
     assert not any(event["type"] == "attempt_exception" for event in events)
+    trajectory = json.loads(recorder.path.read_text(encoding="utf-8"))
+    assert trajectory["steps"][0]["inference_time_s"] == 1.0
 
 
 @pytest.mark.asyncio

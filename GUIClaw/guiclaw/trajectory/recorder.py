@@ -156,6 +156,7 @@ class TrajectoryRecorder:
         interaction_target: dict[str, Any] | None = None,
         phase: ExecutionPhase | None = None,
         token_usage: dict[str, int] | None = None,
+        inference_time_s: float | None = None,
     ) -> None:
         """Persist one model or skill action using only reusable compact fields."""
         trajectory = self._require_trajectory()
@@ -184,6 +185,8 @@ class TrajectoryRecorder:
         cleaned_usage = _clean_token_usage(token_usage)
         if cleaned_usage:
             step["token_usage"] = cleaned_usage
+        if inference_time_s is not None:
+            step["inference_time_s"] = round(inference_time_s, 3)
         if action_type == "use_skill" and self._pending_skill:
             step["skill"] = dict(self._pending_skill)
             self._pending_skill = {}

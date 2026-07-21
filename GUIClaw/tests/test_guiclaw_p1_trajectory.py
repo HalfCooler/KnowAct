@@ -62,6 +62,7 @@ def test_trajectory_recorder_writes_compact_json_artifacts(tmp_path: Path) -> No
         foreground_app="tv.danmaku.bili",
         interaction_target={"selector": {"text": "result"}},
         token_usage={"prompt_tokens": 10, "completion_tokens": 2},
+        inference_time_s=1.2345,
     )
     rec.finish(success=True, summary="video is playing")
 
@@ -104,6 +105,7 @@ def test_trajectory_recorder_writes_compact_json_artifacts(tmp_path: Path) -> No
             "app": "tv.danmaku.bili",
             "interaction_target": {"selector": {"text": "result"}},
             "token_usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            "inference_time_s": 1.234,
         }
     ]
     assert "duration_s" not in trajectory["steps"][0]

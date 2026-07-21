@@ -1087,6 +1087,7 @@ class GuiAgent:
             foreground_app=recorded_observation.foreground_app,
             interaction_target=self._scrub_for_artifact(result.interaction_target),
             token_usage=(result.event_usage or result.step_usage) or None,
+            inference_time_s=result.chat_latency_s,
         )
 
     # ------------------------------------------------------------------
@@ -1184,11 +1185,13 @@ class GuiAgent:
                 chat_kwargs["reasoning_effort"] = self._reasoning_effort
             if self._step_max_tokens is not None:
                 chat_kwargs["max_tokens"] = self._step_max_tokens
-            response: LLMResponse = await self.llm.chat(**chat_kwargs)
+            inference_started_at = time.time()
+            try:
+                response: LLMResponse = await self.llm.chat(**chat_kwargs)
+            finally:
+                step_chat_latency_s += time.time() - inference_started_at
             for k, v in (response.usage or {}).items():
                 step_usage[k] = step_usage.get(k, 0) + v
-            if response.latency_s is not None:
-                step_chat_latency_s += response.latency_s
             if step_ttft_s is None and response.ttft_s is not None:
                 step_ttft_s = response.ttft_s
             raw_response_snapshot = self._snapshot_failed_model_response(response)
