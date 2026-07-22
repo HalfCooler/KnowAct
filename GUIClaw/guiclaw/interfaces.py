@@ -76,6 +76,7 @@ class LLMProvider(typing.Protocol):
         tool_choice: str | None = None,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse: ...
 
 

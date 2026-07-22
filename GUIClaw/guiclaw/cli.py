@@ -71,6 +71,8 @@ class ProviderConfig:
     temperature: float | None = None
     top_p: float | None = None
     vl_high_resolution_images: bool | None = None
+    reasoning_effort: str | None = None
+    extra_body: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -150,12 +152,16 @@ class OpenAICompatibleLLMProvider:
         temperature: float | None = None,
         top_p: float | None = None,
         vl_high_resolution_images: bool | None = None,
+        reasoning_effort: str | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         self._base_url = base_url
         self._model = model
         self._temperature = temperature
         self._top_p = top_p
         self._vl_high_resolution_images = vl_high_resolution_images
+        self._reasoning_effort = reasoning_effort
+        self._extra_body = dict(extra_body or {})
         self._client = AsyncOpenAI(
             api_key=api_key or "no-key",
             base_url=base_url,
@@ -168,6 +174,7 @@ class OpenAICompatibleLLMProvider:
         tool_choice: str | None = None,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         effective_model = model or self._model
         kwargs: dict[str, Any] = {
@@ -183,11 +190,29 @@ class OpenAICompatibleLLMProvider:
             kwargs["temperature"] = self._temperature
         if self._top_p is not None:
             kwargs["top_p"] = self._top_p
+        extra_body: dict[str, Any] = {}
         high_resolution = self._vl_high_resolution_images
         if high_resolution is None:
             high_resolution = _is_dashscope_gui_plus(self._base_url, effective_model)
         if high_resolution:
-            kwargs["extra_body"] = {"vl_high_resolution_images": True}
+            extra_body["vl_high_resolution_images"] = True
+
+        effective_reasoning_effort = reasoning_effort or self._reasoning_effort
+        if effective_reasoning_effort:
+            thinking_enabled = effective_reasoning_effort.strip().lower() not in {
+                "none",
+                "minimal",
+                "minimum",
+            }
+            if _is_dashscope_endpoint(self._base_url):
+                extra_body["enable_thinking"] = thinking_enabled
+            else:
+                extra_body["chat_template_kwargs"] = {
+                    "enable_thinking": thinking_enabled
+                }
+        extra_body = _deep_merge(extra_body, self._extra_body)
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         response = await self._client.chat.completions.create(**kwargs)
         if not response.choices:
@@ -257,6 +282,8 @@ def build_llm_provider(config: ProviderConfig) -> OpenAICompatibleLLMProvider:
         temperature=config.temperature,
         top_p=config.top_p,
         vl_high_resolution_images=config.vl_high_resolution_images,
+        reasoning_effort=config.reasoning_effort,
+        extra_body=config.extra_body,
     )
 
 
@@ -383,6 +410,9 @@ def load_config(path: Path | None = None) -> CliConfig:
     provider_raw = _require_mapping(raw, "provider")
     provider_api_key = _optional_string(provider_raw, "api_key") or os.getenv("OPENAI_API_KEY")
     high_resolution_raw = provider_raw.get("vl_high_resolution_images")
+    provider_extra_body = provider_raw.get("extra_body")
+    if provider_extra_body is not None and not isinstance(provider_extra_body, dict):
+        raise ValueError("provider.extra_body config must be a mapping")
     provider = ProviderConfig(
         base_url=_require_string(provider_raw, "base_url"),
         model=_require_string(provider_raw, "model"),
@@ -394,6 +424,8 @@ def load_config(path: Path | None = None) -> CliConfig:
             if high_resolution_raw is None
             else _coerce_bool(high_resolution_raw, default=False)
         ),
+        reasoning_effort=_optional_string(provider_raw, "reasoning_effort"),
+        extra_body=provider_extra_body,
     )
 
     postprocess_raw = raw.get("postprocess_provider")
@@ -402,6 +434,9 @@ def load_config(path: Path | None = None) -> CliConfig:
         if not isinstance(postprocess_raw, dict):
             raise ValueError("postprocess_provider config must be a mapping")
         postprocess_high_resolution = postprocess_raw.get("vl_high_resolution_images")
+        postprocess_extra_body = postprocess_raw.get("extra_body")
+        if postprocess_extra_body is not None and not isinstance(postprocess_extra_body, dict):
+            raise ValueError("postprocess_provider.extra_body config must be a mapping")
         postprocess_provider = ProviderConfig(
             base_url=_require_string(postprocess_raw, "base_url"),
             model=_require_string(postprocess_raw, "model"),
@@ -417,6 +452,8 @@ def load_config(path: Path | None = None) -> CliConfig:
                 if postprocess_high_resolution is None
                 else _coerce_bool(postprocess_high_resolution, default=False)
             ),
+            reasoning_effort=_optional_string(postprocess_raw, "reasoning_effort"),
+            extra_body=postprocess_extra_body,
         )
 
     embedding_raw = raw.get("embedding")
@@ -675,6 +712,7 @@ async def _execute_agent(
         enable_prompt_skill_selection=skill_execution_enabled,
         image_scale_ratio=config.image_scale_ratio,
         stagnation_limit=config.stagnation_limit,
+        reasoning_effort=config.provider.reasoning_effort,
     )
     result = await agent.run(task)
     if skill_extraction_enabled or config.enable_memory_extraction or config.evaluation.enabled:
@@ -1047,13 +1085,28 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
     return value
 
 
-def _is_dashscope_gui_plus(base_url: str, model: str) -> bool:
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _is_dashscope_endpoint(base_url: str) -> bool:
     host = (urlparse(base_url).hostname or "").lower()
-    is_dashscope = host.endswith(".aliyuncs.com") and any(
+    return host.endswith(".aliyuncs.com") and any(
         label.startswith("dashscope") or label == "maas" for label in host.split(".")
     )
+
+
+def _is_dashscope_gui_plus(base_url: str, model: str) -> bool:
     model_name = model.rsplit("/", 1)[-1].strip().lower()
-    return is_dashscope and (model_name == "gui-plus" or model_name.startswith("gui-plus-"))
+    return _is_dashscope_endpoint(base_url) and (
+        model_name == "gui-plus" or model_name.startswith("gui-plus-")
+    )
 
 
 if __name__ == "__main__":

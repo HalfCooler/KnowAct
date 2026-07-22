@@ -29,6 +29,10 @@ class TestCustomProviderThinkingStyle:
         spec = create_dynamic_spec("custom", thinking_style="reasoning_split")
         assert spec.thinking_style == "reasoning_split"
 
+    def test_create_dynamic_spec_with_chat_template_kwargs(self) -> None:
+        spec = create_dynamic_spec("custom", thinking_style="chat_template_kwargs")
+        assert spec.thinking_style == "chat_template_kwargs"
+
     def test_provider_config_accepts_camel_case(self) -> None:
         """Config JSON uses camelCase: thinkingStyle."""
         cfg = ProviderConfig.model_validate({"thinkingStyle": "thinking_type"})
@@ -60,3 +64,4 @@ class TestCustomProviderThinkingStyle:
         assert "thinking_type" in message
         assert "enable_thinking" in message
         assert "reasoning_split" in message
+        assert "chat_template_kwargs" in message

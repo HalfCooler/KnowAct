@@ -189,6 +189,7 @@ class ProviderConfig(Base):
         "thinking_type",
         "enable_thinking",
         "reasoning_split",
+        "chat_template_kwargs",
     )
 
     @field_validator("thinking_style")

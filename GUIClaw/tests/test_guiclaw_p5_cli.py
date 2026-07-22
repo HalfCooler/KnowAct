@@ -213,6 +213,9 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
           temperature: 0.2
           top_p: 0.8
           vl_high_resolution_images: true
+          reasoning_effort: none
+          extra_body:
+            repetition_penalty: 1.1
         adb:
           serial: emulator-5554
           adb_path: /tmp/adb
@@ -226,6 +229,8 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert override.provider.temperature == pytest.approx(0.2)
     assert override.provider.top_p == pytest.approx(0.8)
     assert override.provider.vl_high_resolution_images is True
+    assert override.provider.reasoning_effort == "none"
+    assert override.provider.extra_body == {"repetition_penalty": 1.1}
     assert override.adb.serial == "emulator-5554"
     assert override.adb.adb_path == "/tmp/adb"
     assert override.adb.capture_source == "screencap"
@@ -414,6 +419,102 @@ async def test_openai_provider_configures_dashscope_gui_plus_high_resolution(
         assert "extra_body" not in captured
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base_url", "expected_extra_body"),
+    [
+        (
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            {"enable_thinking": False},
+        ),
+        (
+            "http://localhost:8000/v1",
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        ),
+    ],
+)
+async def test_openai_provider_disables_thinking_for_dashscope_and_vllm(
+    monkeypatch: pytest.MonkeyPatch,
+    base_url: str,
+    expected_extra_body: dict[str, Any],
+) -> None:
+    import guiclaw.cli as cli
+
+    captured: dict[str, Any] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="ok", tool_calls=None)
+                    )
+                ],
+                usage=None,
+            )
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+            self.chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(cli, "AsyncOpenAI", FakeAsyncOpenAI)
+    provider = cli.OpenAICompatibleLLMProvider(
+        base_url=base_url,
+        model="qwen3-vl",
+        reasoning_effort="none",
+    )
+
+    await provider.chat([{"role": "user", "content": "test"}])
+
+    assert captured["extra_body"] == expected_extra_body
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_explicit_extra_body_overrides_thinking_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import guiclaw.cli as cli
+
+    captured: dict[str, Any] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="ok", tool_calls=None)
+                    )
+                ],
+                usage=None,
+            )
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+            self.chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(cli, "AsyncOpenAI", FakeAsyncOpenAI)
+    provider = cli.OpenAICompatibleLLMProvider(
+        base_url="http://localhost:8000/v1",
+        model="qwen3-vl",
+        reasoning_effort="high",
+        extra_body={
+            "chat_template_kwargs": {"enable_thinking": False},
+            "repetition_penalty": 1.1,
+        },
+    )
+
+    await provider.chat([{"role": "user", "content": "test"}])
+
+    assert captured["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False},
+        "repetition_penalty": 1.1,
+    }
+
+
 def test_build_backend_variants(monkeypatch: pytest.MonkeyPatch) -> None:
     import guiclaw.cli as cli
 
@@ -462,6 +563,7 @@ def test_cli_runs_dry_run_agent_loop(
             base_url="http://localhost:1234/v1",
             model="qwen-gui",
             api_key="test-key",
+            reasoning_effort="none",
         )
     )
     backend = _FakeBackend()
@@ -527,6 +629,7 @@ def test_cli_runs_dry_run_agent_loop(
     assert agent_state["agent_profile"] == "seed"
     assert agent_state["artifacts_root"] == recorder_state["output_dir"]
     assert agent_state["stagnation_limit"] == 0
+    assert agent_state["reasoning_effort"] == "none"
     assert agent_state["enable_prompt_skill_selection"] is False
 
 

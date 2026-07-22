@@ -48,6 +48,7 @@ class NanobotLLMAdapter:
         tool_choice: str | None = None,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> GUIClawLLMResponse:
         effective_max_tokens = max_tokens if max_tokens is not None else self._max_tokens
         kwargs: dict[str, Any] = dict(
@@ -58,6 +59,8 @@ class NanobotLLMAdapter:
         )
         if effective_max_tokens is not None:
             kwargs["max_tokens"] = effective_max_tokens
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
 
         ttft_s: float | None = None
         start = time.perf_counter()
@@ -101,4 +104,3 @@ class NanobotEmbeddingAdapter:
 
     async def embed(self, texts: list[str]) -> np.ndarray:
         return await self._embed_fn(texts)
-

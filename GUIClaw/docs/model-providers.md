@@ -25,6 +25,7 @@ scale:
 provider:
   base_url: "http://localhost:8000/v1"
   model: "mPLUG/GUI-Owl-1.5-8B-Instruct"
+  reasoning_effort: "none"  # optional: disable thinking through vLLM
   # temperature: 0.2  # optional
   # top_p: 0.8
 
@@ -51,6 +52,7 @@ Use the GUI-Owl action contract:
 provider:
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   model: "gui-plus"
+  reasoning_effort: "none"  # optional: disable thinking on DashScope
 
 postprocess_provider:
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -90,6 +92,21 @@ provider:
   vl_high_resolution_images: false
 ```
 
+### Thinking control
+
+Standalone GUIClaw accepts `provider.reasoning_effort` and the same field under
+`postprocess_provider`. Values `none`, `minimal`, and `minimum` disable
+thinking; another non-empty value enables it. The request mapping is:
+
+| Endpoint | Request body |
+| --- | --- |
+| DashScope (`aliyuncs.com`) | `{"enable_thinking": false}` |
+| Local or other OpenAI-compatible endpoints, including vLLM | `{"chat_template_kwargs":{"enable_thinking": false}}` |
+
+Omit `reasoning_effort` to preserve the server default. If an endpoint uses a
+different contract, set `provider.extra_body`; it is merged last and therefore
+overrides the automatic mapping.
+
 ### Coordinate behavior
 
 The exact legacy model name `gui-plus` returns absolute coordinates in the
@@ -107,6 +124,7 @@ unless it implements that coordinate contract.
 | Taps are consistently offset | Confirm `agent_profile: gui_owl` and verify whether the model uses smart-resized pixels or the 0–1000 grid. |
 | GUI-Owl receives stale Android frames | Use `adb.capture_source: auto` or `screencap`. |
 | Endpoint rejects `vl_high_resolution_images` | Set `provider.vl_high_resolution_images: false`. |
+| The model still emits thinking after `reasoning_effort: none` | Confirm that the endpoint accepts the mapped field above; otherwise override it with `provider.extra_body`. |
 | A self-hosted model behaves differently after setting `image_scale_ratio` | Remove the override and use the GUI-Owl profile's smart-resize path. |
 | The model returns no usable action | Confirm that the selected profile matches the model's output format. |
 

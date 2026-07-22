@@ -90,6 +90,9 @@ _THINKING_STYLE_MAP: dict[str, Any] = {
     "thinking_type": lambda on: {"thinking": {"type": "enabled" if on else "disabled"}},
     "enable_thinking": lambda on: {"enable_thinking": on},
     "reasoning_split": lambda on: {"reasoning_split": on},
+    "chat_template_kwargs": lambda on: {
+        "chat_template_kwargs": {"enable_thinking": on}
+    },
 }
 _GATEWAY_REASONING_STYLE_MAP: dict[str, Any] = {
     "reasoning_effort": lambda effort: {"reasoning": {"effort": effort}},
@@ -832,9 +835,11 @@ class OpenAICompatProvider(LLMProvider):
             # Moonshot rejects requests that carry both 'reasoning_effort'
             # and the native 'thinking' param.  We already expressed the
             # user's intent via the provider-native shape, so drop the
-            # redundant wire-level kwarg.  Only kimi models need this —
-            # Xiaomi's API accepts both params.
-            if slug in _KIMI_THINKING_MODELS:
+            # redundant wire-level kwarg. Kimi uses its native thinking field;
+            # vLLM uses chat_template_kwargs. Xiaomi accepts both params.
+            if slug in _KIMI_THINKING_MODELS or (
+                spec and spec.thinking_style == "chat_template_kwargs"
+            ):
                 kwargs.pop("reasoning_effort", None)
 
         if tools:

@@ -117,6 +117,24 @@ class TestBuildKwargsExtraBody:
             "chat_template_kwargs": {"enable_thinking": False},
         }
 
+    def test_vllm_reasoning_effort_maps_to_chat_template_kwargs(self) -> None:
+        provider = OpenAICompatProvider(
+            api_key="test",
+            default_model="qwen3-vl",
+            spec=find_by_name("vllm"),
+        )
+
+        kwargs = provider._build_kwargs(
+            messages=_simple_messages(),
+            tools=None, model=None, max_tokens=100,
+            temperature=0.1, reasoning_effort="none", tool_choice=None,
+        )
+
+        assert "reasoning_effort" not in kwargs
+        assert kwargs["extra_body"] == {
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+
     def test_extra_body_merges_with_thinking(self) -> None:
         """Config extra_body should merge with (and override) thinking params."""
         from nanobot.providers.registry import ProviderSpec

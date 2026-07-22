@@ -75,6 +75,7 @@ class ProviderSpec:
     #                   (DeepSeek, VolcEngine, BytePlus)
     # "enable_thinking" — {"enable_thinking": true/false}  (DashScope)
     # "reasoning_split" — {"reasoning_split": true/false}  (MiniMax)
+    # "chat_template_kwargs" — {"chat_template_kwargs": {"enable_thinking": bool}} (vLLM)
     thinking_style: str = ""
 
     # Gateway-native reasoning control to pair with model-level thinking styles.
@@ -538,6 +539,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         display_name="vLLM",
         backend="openai_compat",
         is_local=True,
+        thinking_style="chat_template_kwargs",
     ),
     # Ollama (local, OpenAI-compatible)
     ProviderSpec(

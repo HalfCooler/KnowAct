@@ -343,6 +343,21 @@ async def test_llm_adapter_maps_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_adapter_forwards_gui_reasoning_effort() -> None:
+    from nanobot.agent.gui_adapter import NanobotLLMAdapter
+
+    provider = _MockNanobotProvider([NanobotLLMResponse(content="done", tool_calls=[])])
+    adapter = NanobotLLMAdapter(provider=provider, model=provider.get_default_model())
+
+    await adapter.chat(
+        messages=[{"role": "user", "content": "Finish"}],
+        reasoning_effort="none",
+    )
+
+    assert provider.calls[0]["reasoning_effort"] == "none"
+
+
+@pytest.mark.asyncio
 async def test_llm_adapter_empty_tool_calls() -> None:
     from nanobot.agent.gui_adapter import NanobotLLMAdapter
 

@@ -78,6 +78,7 @@ The standalone command requires a YAML configuration. Create
 provider:
   base_url: "https://api.example.com/v1"
   model: "your-vision-model"
+  reasoning_effort: "none"  # optional; omit to preserve the server default
 
 max_steps: 15
 stagnation_limit: 0
@@ -206,11 +207,15 @@ sections are rejected when they affect a supported field.
 | `provider.api_key` | `OPENAI_API_KEY` | Optional inline key; the environment variable is used when omitted. |
 | `provider.temperature` | server default | Optional sampling temperature. |
 | `provider.top_p` | server default | Optional nucleus-sampling value in `(0, 1]`. |
+| `provider.reasoning_effort` | server default | Optional thinking control. `none`, `minimal`, or `minimum` disables thinking; another non-empty value enables it. |
+| `provider.extra_body` | omitted | Optional provider-specific request fields. These fields are merged last and can override the automatic thinking mapping. |
 | `provider.vl_high_resolution_images` | automatic | Optional provider-specific high-resolution image request. Supported endpoints are detected automatically. |
 | `postprocess_provider` | omitted | Optional OpenAI-compatible general model for summaries, memory extraction, skill extraction/evolution, and skill merging. When omitted, `provider` is reused. |
 | `postprocess_provider.base_url` | required when set | General-model API base URL. |
 | `postprocess_provider.model` | required when set | General model identifier. Use a multimodal model when skill extraction is enabled. |
 | `postprocess_provider.api_key` | `OPENAI_API_KEY`, then `provider.api_key` | Optional separate API key. |
+| `postprocess_provider.reasoning_effort` | server default | Optional thinking control for summaries, evaluation, memory, and skill processing. |
+| `postprocess_provider.extra_body` | omitted | Optional provider-specific request fields for post-processing. |
 | `embedding` | omitted | Optional OpenAI-compatible embedding endpoint. |
 | `embedding.base_url` | required when `embedding` is set | Embedding API base URL. |
 | `embedding.model` | required when `embedding` is set | Embedding model identifier. |
@@ -278,6 +283,12 @@ The GUI model remains responsible only for observation-to-action decisions;
 configured post-run work uses `postprocess_provider`.
 Skills are written to `skills_dir/skills.py`; memory is written to
 `memory_dir/gui_memory_bank.jsonl`.
+
+For standalone OpenAI-compatible endpoints, GUIClaw translates
+`reasoning_effort` to `enable_thinking` on DashScope and to
+`chat_template_kwargs.enable_thinking` on local or other endpoints, including
+vLLM. Leave the field unset to keep the server default. See
+[Model and provider compatibility](model-providers.md) for examples.
 
 Desktop skill features are permanently disabled even when the individual skill
 switches are enabled. macOS, Linux, and Windows do not retrieve, inject,
