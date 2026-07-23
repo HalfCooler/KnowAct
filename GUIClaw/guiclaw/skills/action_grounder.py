@@ -128,6 +128,7 @@ class ActionGrounder:
                     screen_width=screen_width,
                     screen_height=screen_height,
                     model_name=self._model,
+                    image_scale_ratio=self._image_scale_ratio,
                 )
             except Exception as exc:
                 if attempt < self._MAX_RETRIES:

@@ -464,6 +464,7 @@ def test_gui_config_defaults() -> None:
     assert config.max_steps == 15
     assert config.stagnation_limit == 0
     assert config.image_scale_ratio == pytest.approx(0.5)
+    assert config.history_image_window is None
     assert config.agent_profile is None
 
 
@@ -482,6 +483,7 @@ def test_gui_config_validation() -> None:
     assert GuiConfig.model_validate({"imageScaleRatio": 0.25}).image_scale_ratio == pytest.approx(
         0.25
     )
+    assert GuiConfig.model_validate({"historyImageWindow": 3}).history_image_window == 3
     assert GuiConfig.model_validate({"stagnationLimit": 3}).stagnation_limit == 3
     with pytest.raises(ValidationError):
         GuiConfig(backend="invalid")
@@ -493,6 +495,8 @@ def test_gui_config_validation() -> None:
         GuiConfig(image_scale_ratio=0)
     with pytest.raises(ValidationError):
         GuiConfig(image_scale_ratio=1.2)
+    with pytest.raises(ValidationError):
+        GuiConfig(history_image_window=0)
     with pytest.raises(ValidationError):
         GuiConfig(adb={"captureSource": "invalid"})
 

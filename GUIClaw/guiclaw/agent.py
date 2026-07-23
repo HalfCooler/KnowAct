@@ -334,7 +334,8 @@ class GuiAgent:
         max_steps: Maximum steps per single attempt.
         step_timeout: Timeout in seconds for each step (LLM + execute + observe).
         history_image_window: Number of recent screenshot turns kept as full
-            image context, including the current screen.
+            image context, including the current screen. ``None`` keeps the
+            profile default (GUI-Owl: 5; other profiles: 1).
         progress_callback: Optional async callback for progress reporting.
         stagnation_limit: Consecutive unchanged-screen transitions before abort.
     """
@@ -361,7 +362,7 @@ class GuiAgent:
         artifacts_root: Path | str = DEFAULT_GUI_RUNS_DIR,
         max_steps: int = 15,
         step_timeout: float = 90.0,
-        history_image_window: int = 1,
+        history_image_window: int | None = None,
         progress_callback: ProgressCallback | None = None,
         memory_retriever: Any = None,
         skill_library: Any = None,
@@ -401,7 +402,9 @@ class GuiAgent:
         self.artifacts_root = Path(artifacts_root)
         self.max_steps = max_steps
         self.step_timeout = step_timeout
-        self.history_image_window = max(1, history_image_window)
+        self.history_image_window = (
+            None if history_image_window is None else max(1, history_image_window)
+        )
         self.progress_callback = progress_callback
         self._trajectory_recorder = trajectory_recorder
         self._memory_retriever = memory_retriever
@@ -1202,6 +1205,7 @@ class GuiAgent:
                     response,
                     current_observation,
                     model_name=self.model,
+                    image_scale_ratio=self._image_scale_ratio,
                 )
             except ValueError as exc:
                 # Unparsable response: re-roll the LLM on the same observation
@@ -2232,6 +2236,7 @@ class GuiAgent:
             history_image_window=self.history_image_window,
             compact_prompt_parts=prompt_skill_parts,
             available_apps=self._available_apps or (),
+            image_scale_ratio=self._image_scale_ratio,
         )
 
     async def _load_available_apps(self) -> None:

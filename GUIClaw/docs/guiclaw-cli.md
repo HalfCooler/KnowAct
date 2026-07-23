@@ -83,6 +83,7 @@ provider:
 max_steps: 15
 stagnation_limit: 0
 image_scale_ratio: 0.5
+history_image_window: 1  # total images including the current frame
 agent_profile: default
 ```
 
@@ -222,7 +223,8 @@ sections are rejected when they affect a supported field.
 | `embedding.api_key` | provider key | Separate embedding key. |
 | `max_steps` | `15` | Maximum GUI decision steps. Must be positive. |
 | `stagnation_limit` | `0` | Repeated-screen limit; `0` disables the detector. |
-| `image_scale_ratio` | `0.5` | Screenshot scale in `(0, 1]` for model and validation calls. Some profiles apply their own preprocessing. |
+| `image_scale_ratio` | `0.5` | Screenshot scale in `(0, 1]` for model and validation calls. GUI-Owl applies this scale before its factor-28 smart resize. |
+| `history_image_window` | profile default | Total screenshot count including the current frame. Unset keeps each profile's default; GUI-Owl uses 5. Set `1` for current-frame-only input. |
 | `agent_profile` | `default` | Prompt and action contract. |
 | `memory_dir` | `~/.guiclaw/memory` | Policy and extracted-memory storage. Retrieval additionally requires `embedding`. |
 | `skills_dir` | `~/.guiclaw/skill` | Flat skill store for online reuse and extraction. |
@@ -353,6 +355,7 @@ Both camelCase and snake_case keys are accepted.
 | `maxSteps` | `15` |
 | `stagnationLimit` | `0` |
 | `imageScaleRatio` | `0.5` |
+| `historyImageWindow` | profile default; GUI-Owl uses `5` |
 | `background` | `false` |
 | `displayWidth`, `displayHeight` | `1280`, `720` |
 | `enableSkillExecution` | `false` |

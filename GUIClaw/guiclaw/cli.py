@@ -129,6 +129,7 @@ class CliConfig:
     max_steps: int = 15
     stagnation_limit: int = 0
     image_scale_ratio: float = 0.5
+    history_image_window: int | None = None
     memory_dir: Path | None = None
     skills_dir: Path | None = None
     enable_skill_execution: bool = False
@@ -534,6 +535,7 @@ def load_config(path: Path | None = None) -> CliConfig:
         max_steps=_coerce_positive_int(raw.get("max_steps"), default=15),
         stagnation_limit=_coerce_non_negative_int(raw.get("stagnation_limit"), default=0),
         image_scale_ratio=_coerce_image_scale_ratio(raw.get("image_scale_ratio"), default=0.5),
+        history_image_window=_coerce_optional_positive_int(raw.get("history_image_window")),
         memory_dir=_optional_path(raw.get("memory_dir")),
         skills_dir=_optional_path(raw.get("skills_dir")),
         enable_skill_execution=_coerce_bool(raw.get("enable_skill_execution"), default=False),
@@ -659,6 +661,7 @@ async def build_optional_components(
             agent_profile=config.agent_profile,
             step_timeout=60.0,
             image_scale_ratio=config.image_scale_ratio,
+            history_image_window=config.history_image_window,
         ),
         screenshot_provider=_AgentScreenshotProvider(
             backend=backend,
@@ -711,6 +714,7 @@ async def _execute_agent(
         agent_profile=args.agent_profile or config.agent_profile,
         enable_prompt_skill_selection=skill_execution_enabled,
         image_scale_ratio=config.image_scale_ratio,
+        history_image_window=config.history_image_window,
         stagnation_limit=config.stagnation_limit,
         reasoning_effort=config.provider.reasoning_effort,
     )
@@ -1023,6 +1027,18 @@ def _coerce_positive_int(value: Any, *, default: int) -> int:
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Expected positive integer, got {value!r}") from exc
     return parsed if parsed > 0 else default
+
+
+def _coerce_optional_positive_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Expected positive integer, got {value!r}") from exc
+    if parsed < 1:
+        raise ValueError(f"Expected positive integer, got {value!r}")
+    return parsed
 
 
 def _coerce_non_negative_int(value: Any, *, default: int) -> int:

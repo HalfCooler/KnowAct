@@ -18,8 +18,7 @@ ADB screencap. Other profiles use scrcpy when `auto` is selected.
 
 ## Self-hosted GUI-Owl 1.5
 
-Use the GUI-Owl profile directly instead of compensating with a global image
-scale:
+Use the GUI-Owl profile directly and configure the input scale when needed:
 
 ```yaml
 provider:
@@ -30,14 +29,16 @@ provider:
   # top_p: 0.8
 
 agent_profile: gui_owl
+image_scale_ratio: 0.5  # applied before GUI-Owl factor-28 smart resize
+history_image_window: 1  # current frame only; omit to keep GUI-Owl's default of 5
 adb:
   capture_source: auto
 ```
 
 The profile:
 
-- keeps four prior screenshot turns plus the current screen;
-- applies factor-28 smart resize;
+- keeps four prior screenshot turns plus the current screen by default, configurable with `history_image_window`;
+- applies `image_scale_ratio`, then factor-28 smart resize;
 - uses the 0–1000 coordinate grid;
 - caps each GUI decision at 2048 output tokens.
 
@@ -125,7 +126,7 @@ unless it implements that coordinate contract.
 | GUI-Owl receives stale Android frames | Use `adb.capture_source: auto` or `screencap`. |
 | Endpoint rejects `vl_high_resolution_images` | Set `provider.vl_high_resolution_images: false`. |
 | The model still emits thinking after `reasoning_effort: none` | Confirm that the endpoint accepts the mapped field above; otherwise override it with `provider.extra_body`. |
-| A self-hosted model behaves differently after setting `image_scale_ratio` | Remove the override and use the GUI-Owl profile's smart-resize path. |
+| A self-hosted model loses small UI details | Increase `image_scale_ratio`; GUI-Owl applies it before factor-28 smart resize. |
 | The model returns no usable action | Confirm that the selected profile matches the model's output format. |
 
 Provider-specific notes should describe stable request or coordinate contracts.

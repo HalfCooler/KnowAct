@@ -198,6 +198,7 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert cfg.provider.vl_high_resolution_images is None
     assert cfg.adb.capture_source == "auto"
     assert cfg.image_scale_ratio == pytest.approx(0.5)
+    assert cfg.history_image_window is None
     assert cfg.stagnation_limit == 0
     assert cfg.enable_skill_execution is False
     assert cfg.enable_skill_extraction is False
@@ -242,6 +243,7 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
           base_url: http://localhost:9999/v1
           model: qwen-custom
         image_scale_ratio: 0.25
+        history_image_window: 3
         stagnation_limit: 3
         enable_skill_execution: true
         enable_skill_extraction: true
@@ -250,6 +252,7 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     )
     scaled = cli.load_config(scaled_config)
     assert scaled.image_scale_ratio == pytest.approx(0.25)
+    assert scaled.history_image_window == 3
     assert scaled.stagnation_limit == 3
     assert scaled.enable_skill_execution is True
     assert scaled.enable_skill_extraction is True
@@ -564,7 +567,8 @@ def test_cli_runs_dry_run_agent_loop(
             model="qwen-gui",
             api_key="test-key",
             reasoning_effort="none",
-        )
+        ),
+        history_image_window=2,
     )
     backend = _FakeBackend()
     recorder_state: dict[str, Any] = {}
@@ -629,6 +633,7 @@ def test_cli_runs_dry_run_agent_loop(
     assert agent_state["agent_profile"] == "seed"
     assert agent_state["artifacts_root"] == recorder_state["output_dir"]
     assert agent_state["stagnation_limit"] == 0
+    assert agent_state["history_image_window"] == 2
     assert agent_state["reasoning_effort"] == "none"
     assert agent_state["enable_prompt_skill_selection"] is False
 
@@ -1054,6 +1059,7 @@ def test_cli_enables_memory_and_skill_bundle_when_embedding_config_present(
         ),
         enable_skill_execution=True,
         agent_profile="qwen3vl",
+        history_image_window=2,
     )
     artifacts_root = Path("/tmp/guiclaw-skill-artifacts")
 
@@ -1082,6 +1088,7 @@ def test_cli_enables_memory_and_skill_bundle_when_embedding_config_present(
     assert calls["grounder"][0]["image_scale_ratio"] == pytest.approx(0.5)
     assert calls["runner"][0]["agent_profile"] == "qwen3vl"
     assert calls["runner"][0]["image_scale_ratio"] == pytest.approx(0.5)
+    assert calls["runner"][0]["history_image_window"] == 2
     assert calls["screenshots"][0]["artifacts_root"] == artifacts_root
 
     memory_only = replace(with_embedding, enable_skill_execution=False)

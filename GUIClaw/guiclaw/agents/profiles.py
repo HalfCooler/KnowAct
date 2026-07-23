@@ -51,6 +51,7 @@ from guiclaw.agents.utils.prompts import (
     MOBILE_QWEN3VL_USER_TEMPLATE,
     SEED_PROMPT,
 )
+from guiclaw.image_utils import normalize_image_scale_ratio
 from guiclaw.interfaces import LLMResponse, ToolCall
 from guiclaw.observation import Observation
 from guiclaw.skills.compact_prompt import (
@@ -184,11 +185,19 @@ def build_profile_messages(
     current_observation: Observation,
     history: list[Any],
     model_name: str,
-    history_image_window: int,
+    history_image_window: int | None,
     compact_prompt_parts: Any | None = None,
     available_apps: tuple[str, ...] | list[str] = (),
+    image_scale_ratio: float = 1.0,
 ) -> list[dict[str, Any]]:
     profile = canonicalize_agent_profile(profile_name)
+    effective_history_image_window = (
+        _GUI_OWL_HISTORY_TURNS + 1
+        if history_image_window is None and profile == "gui_owl"
+        else 1
+        if history_image_window is None
+        else max(1, int(history_image_window))
+    )
     if profile == "default":
         return _build_default_messages(
             task=task,
@@ -204,7 +213,7 @@ def build_profile_messages(
             current_observation=current_observation,
             history=history,
             model_name=model_name,
-            history_image_window=history_image_window,
+            history_image_window=effective_history_image_window,
             prompt_template=GENERAL_E2E_PROMPT_TEMPLATE,
             compact_prompt_parts=compact_prompt_parts,
         )
@@ -217,7 +226,7 @@ def build_profile_messages(
             task=task,
             current_observation=current_observation,
             history=history,
-            history_image_window=history_image_window,
+            history_image_window=effective_history_image_window,
         )
     if profile == "gelab":
         return _build_gelab_messages(
@@ -228,7 +237,7 @@ def build_profile_messages(
             task=task,
             current_observation=current_observation,
             history=history,
-            history_image_window=history_image_window,
+            history_image_window=effective_history_image_window,
             compact_prompt_parts=compact_prompt_parts,
         )
     if profile == "gui_owl":
@@ -237,14 +246,15 @@ def build_profile_messages(
             current_observation=current_observation,
             history=history,
             model_name=model_name,
-            history_image_window=_GUI_OWL_HISTORY_TURNS + 1,
+            history_image_window=effective_history_image_window,
+            image_scale_ratio=image_scale_ratio,
         )
     if profile == "venus":
         return _build_ui_venus_messages(
             task=task,
             current_observation=current_observation,
             history=history,
-            history_image_window=history_image_window,
+            history_image_window=effective_history_image_window,
         )
     raise ValueError(f"Unsupported agent profile: {profile}")
 
@@ -255,6 +265,7 @@ def normalize_profile_response_for_observation(
     observation: Observation,
     *,
     model_name: str = "",
+    image_scale_ratio: float = 1.0,
 ) -> LLMResponse:
     return normalize_profile_response_for_screen(
         profile_name,
@@ -262,6 +273,7 @@ def normalize_profile_response_for_observation(
         screen_width=int(observation.screen_width or 999),
         screen_height=int(observation.screen_height or 999),
         model_name=model_name,
+        image_scale_ratio=image_scale_ratio,
     )
 
 
@@ -272,6 +284,7 @@ def normalize_profile_response_for_screen(
     screen_width: int,
     screen_height: int,
     model_name: str = "",
+    image_scale_ratio: float = 1.0,
     fallback_relative: bool = False,
 ) -> LLMResponse:
     profile = canonicalize_agent_profile(profile_name)
@@ -287,6 +300,7 @@ def normalize_profile_response_for_screen(
             screen_width=screen_width,
             screen_height=screen_height,
             model_name=model_name,
+            image_scale_ratio=image_scale_ratio,
         )
     except Exception as exc:
         raise ValueError(f"Failed to parse {profile} response: {exc}") from exc
@@ -316,6 +330,7 @@ def parse_profile_action(
     screen_width: int,
     screen_height: int,
     model_name: str = "",
+    image_scale_ratio: float = 1.0,
 ) -> dict[str, Any]:
     profile = canonicalize_agent_profile(profile_name)
     if _is_general_e2e_profile(profile):
@@ -356,9 +371,10 @@ def parse_profile_action(
         return _to_guiclaw_payload(action, summary=content)
     if profile == "gui_owl":
         if _is_legacy_gui_plus(model_name):
-            coordinate_height, coordinate_width = _gui_owl_smart_resize(
+            coordinate_height, coordinate_width = _gui_owl_scaled_smart_resize(
                 screen_height,
                 screen_width,
+                image_scale_ratio,
             )
         else:
             coordinate_height = coordinate_width = gui_owl_1_5.SCALE_FACTOR
@@ -654,6 +670,7 @@ def _build_gui_owl_messages(
     history: list[Any],
     model_name: str,
     history_image_window: int,
+    image_scale_ratio: float,
 ) -> list[dict[str, Any]]:
     observations = [turn.observation for turn in history] + [current_observation]
     total_history_count = len(history)
@@ -678,13 +695,17 @@ def _build_gui_owl_messages(
                 previous_steps=previous_steps,
             ),
         },
-        _gui_owl_image_content(observations[text_history_count]),
+        _gui_owl_image_content(
+            observations[text_history_count],
+            image_scale_ratio=image_scale_ratio,
+        ),
     ]
     system_prompt = GUI_OWL_1_5_SYSTEM_PROMPT_TEMPLATE.render(tools="")
     if _is_legacy_gui_plus(model_name):
-        resized_height, resized_width = _gui_owl_smart_resize(
+        resized_height, resized_width = _gui_owl_scaled_smart_resize(
             current_observation.screen_height,
             current_observation.screen_width,
+            image_scale_ratio,
         )
         system_prompt = system_prompt.replace(
             "1000x1000",
@@ -707,7 +728,12 @@ def _build_gui_owl_messages(
         messages.append(
             {
                 "role": "user",
-                "content": [_gui_owl_image_content(observations[index + 1])],
+                "content": [
+                    _gui_owl_image_content(
+                        observations[index + 1],
+                        image_scale_ratio=image_scale_ratio,
+                    )
+                ],
             }
         )
     return messages
@@ -791,11 +817,15 @@ def _image_content(observation: Observation) -> dict[str, Any]:
     }
 
 
-def _gui_owl_image_content(observation: Observation) -> dict[str, Any]:
+def _gui_owl_image_content(
+    observation: Observation,
+    *,
+    image_scale_ratio: float,
+) -> dict[str, Any]:
     return {
         "type": "image_url",
         "image_url": {
-            "url": f"data:image/png;base64,{_gui_owl_observation_base64(observation)}"
+            "url": f"data:image/png;base64,{_gui_owl_observation_base64(observation, image_scale_ratio=image_scale_ratio)}"
         },
     }
 
@@ -817,12 +847,23 @@ def _observation_base64(observation: Observation) -> str:
         return pil_to_base64(image.convert("RGB"))
 
 
-def _gui_owl_observation_base64(observation: Observation) -> str:
+def _gui_owl_observation_base64(
+    observation: Observation,
+    *,
+    image_scale_ratio: float,
+) -> str:
     if not observation.screenshot_path:
         raise ValueError("GUI-Owl requires screenshots.")
     path = Path(observation.screenshot_path)
     with Image.open(path) as image:
         image = image.convert("RGB")
+        scaled_height, scaled_width = _gui_owl_scaled_dimensions(
+            image.height,
+            image.width,
+            image_scale_ratio,
+        )
+        if image.size != (scaled_width, scaled_height):
+            image = image.resize((scaled_width, scaled_height), Image.Resampling.LANCZOS)
         resized_height, resized_width = _gui_owl_smart_resize(
             image.height,
             image.width,
@@ -830,6 +871,28 @@ def _gui_owl_observation_base64(observation: Observation) -> str:
         if image.size != (resized_width, resized_height):
             image = image.resize((resized_width, resized_height))
         return pil_to_base64(image)
+
+
+def _gui_owl_scaled_dimensions(
+    height: int,
+    width: int,
+    image_scale_ratio: float,
+) -> tuple[int, int]:
+    ratio = normalize_image_scale_ratio(image_scale_ratio)
+    return max(1, int(height * ratio)), max(1, int(width * ratio))
+
+
+def _gui_owl_scaled_smart_resize(
+    height: int,
+    width: int,
+    image_scale_ratio: float,
+) -> tuple[int, int]:
+    scaled_height, scaled_width = _gui_owl_scaled_dimensions(
+        height,
+        width,
+        image_scale_ratio,
+    )
+    return _gui_owl_smart_resize(scaled_height, scaled_width)
 
 
 def _gui_owl_smart_resize(height: int, width: int) -> tuple[int, int]:

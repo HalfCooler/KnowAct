@@ -450,6 +450,7 @@ class TestSkillExecutorWiringEnabled:
             backend="dry-run",
             enable_skill_execution=True,
             image_scale_ratio=0.25,
+            history_image_window=2,
         )
         tool = _make_tool(gui_config)
 
@@ -485,6 +486,7 @@ class TestSkillExecutorWiringEnabled:
         assert getattr(skill_executor.state_validator, "_image_scale_ratio", None) == pytest.approx(0.25)
         assert getattr(skill_executor.action_grounder, "_image_scale_ratio", None) == pytest.approx(0.25)
         assert getattr(skill_executor.subgoal_runner, "_image_scale_ratio", None) == pytest.approx(0.25)
+        assert getattr(skill_executor.subgoal_runner, "_history_image_window", None) == 2
 
 
 class TestGuiAgentProfileWiring:
@@ -532,6 +534,7 @@ class TestGuiAgentProfileWiring:
             backend="dry-run",
             enable_skill_execution=True,
             image_scale_ratio=0.4,
+            history_image_window=3,
         )
         tool = _make_tool(gui_config)
 
@@ -563,6 +566,7 @@ class TestGuiAgentProfileWiring:
         asyncio.run(_run())
 
         assert captured_kwargs["image_scale_ratio"] == pytest.approx(0.4)
+        assert captured_kwargs["history_image_window"] == 3
 
     def test_stagnation_limit_is_forwarded_to_agent(self) -> None:
         gui_config = GuiConfig(
