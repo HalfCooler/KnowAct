@@ -131,7 +131,7 @@ def test_gui_owl_messages_match_official_history_and_image_contract(tmp_path: Pa
         current_observation=observations[-1],
         history=history,
         model_name="mPLUG/GUI-Owl-1.5-8B-Instruct",
-        history_image_window=1,
+        history_image_window=None,
     )
 
     image_blocks = [
@@ -160,6 +160,45 @@ def test_gui_owl_messages_match_official_history_and_image_contract(tmp_path: Pa
     )
 
 
+@pytest.mark.parametrize("history_image_window", [1, 2, 3, 5])
+def test_gui_owl_honors_configured_history_image_window(
+    tmp_path: Path,
+    history_image_window: int,
+) -> None:
+    observations = [
+        _observation(tmp_path / f"window-{history_image_window}-{index}.png")
+        for index in range(7)
+    ]
+    history = [
+        SimpleNamespace(
+            observation=observations[index],
+            action_summary=f"Action {index + 1}",
+            tool_result_message={"content": f"tool result {index + 1}"},
+            raw_response_content=f"raw output {index + 1}",
+            assistant_message={"content": f"fallback output {index + 1}"},
+        )
+        for index in range(6)
+    ]
+
+    messages = build_profile_messages(
+        "gui_owl",
+        task="Open Settings",
+        current_observation=observations[-1],
+        history=history,
+        model_name="mPLUG/GUI-Owl-1.5-8B-Instruct",
+        history_image_window=history_image_window,
+    )
+
+    image_blocks = [
+        block
+        for message in messages
+        if isinstance(message["content"], list)
+        for block in message["content"]
+        if block.get("type") == "image_url"
+    ]
+    assert len(image_blocks) == history_image_window
+
+
 def test_gui_owl_images_use_official_smart_resize(tmp_path: Path) -> None:
     screenshot = tmp_path / "screen.png"
     Image.new("RGB", (101, 203), "white").save(screenshot)
@@ -185,6 +224,62 @@ def test_gui_owl_images_use_official_smart_resize(tmp_path: Path) -> None:
         assert image.size == (112, 196)
 
 
+def test_gui_owl_image_scale_ratio_applies_before_smart_resize(tmp_path: Path) -> None:
+    screenshot = tmp_path / "screen.png"
+    Image.new("RGB", (1080, 2376), "white").save(screenshot)
+    observation = Observation(
+        screenshot_path=str(screenshot),
+        screen_width=1080,
+        screen_height=2376,
+        foreground_app="Settings",
+        platform="android",
+    )
+
+    messages = build_profile_messages(
+        "gui_owl",
+        task="Open Settings",
+        current_observation=observation,
+        history=[],
+        model_name="mPLUG/GUI-Owl-1.5-8B-Instruct",
+        history_image_window=3,
+        image_scale_ratio=0.5,
+    )
+
+    data_url = messages[1]["content"][-1]["image_url"]["url"]
+    with Image.open(BytesIO(base64.b64decode(data_url.split(",", 1)[1]))) as image:
+        assert image.size == (532, 1176)
+
+
+def test_gui_agent_forwards_image_scale_ratio_to_gui_owl_messages(tmp_path: Path) -> None:
+    screenshot = tmp_path / "screen.png"
+    Image.new("RGB", (101, 203), "white").save(screenshot)
+    observation = Observation(
+        screenshot_path=str(screenshot),
+        screen_width=101,
+        screen_height=203,
+        foreground_app="Settings",
+        platform="android",
+    )
+    agent = GuiAgent(
+        AsyncMock(),
+        DryRunBackend(),
+        TrajectoryRecorder(output_dir=tmp_path / "traj", task="Open Settings"),
+        artifacts_root=tmp_path / "runs",
+        agent_profile="gui_owl",
+        image_scale_ratio=0.5,
+    )
+
+    messages = agent._build_messages(
+        task="Open Settings",
+        current_observation=observation,
+        history=[],
+    )
+
+    data_url = messages[1]["content"][-1]["image_url"]["url"]
+    with Image.open(BytesIO(base64.b64decode(data_url.split(",", 1)[1]))) as image:
+        assert image.size == (56, 112)
+
+
 def test_legacy_gui_plus_prompt_uses_smart_resized_image_dimensions(tmp_path: Path) -> None:
     screenshot = tmp_path / "screen.png"
     Image.new("RGB", (101, 203), "white").save(screenshot)
@@ -205,6 +300,20 @@ def test_legacy_gui_plus_prompt_uses_smart_resized_image_dimensions(tmp_path: Pa
         history_image_window=3,
     )
     assert "The screen's resolution is 112x196." in legacy_messages[0]["content"]
+
+    scaled_messages = build_profile_messages(
+        "gui_owl",
+        task="Open Settings",
+        current_observation=observation,
+        history=[],
+        model_name="gui-plus",
+        history_image_window=3,
+        image_scale_ratio=0.5,
+    )
+    assert "The screen's resolution is 56x112." in scaled_messages[0]["content"]
+    scaled_data_url = scaled_messages[1]["content"][-1]["image_url"]["url"]
+    with Image.open(BytesIO(base64.b64decode(scaled_data_url.split(",", 1)[1]))) as image:
+        assert image.size == (56, 112)
 
     for model_name in ("gui-plus-2026-02-26", "mPLUG/GUI-Owl-1.5-8B-Instruct"):
         messages = build_profile_messages(
@@ -269,6 +378,20 @@ def test_legacy_gui_plus_maps_smart_resized_pixels_to_device_screen() -> None:
         "coordinate": [543, 2018],
         "coordinate2": [567, 905],
     }
+
+    scaled_payload = parse_profile_action(
+        "gui_owl",
+        """
+<tool_call>
+{"name":"mobile_use","arguments":{"action":"click","coordinate":[364,784]}}
+</tool_call>
+""",
+        screen_width=1440,
+        screen_height=3120,
+        model_name="gui-plus",
+        image_scale_ratio=0.5,
+    )
+    assert (scaled_payload["x"], scaled_payload["y"]) == (720, 1560)
 
     for model_name in ("gui-plus-2026-02-26", "mPLUG/GUI-Owl-1.5-8B-Instruct"):
         with pytest.raises(ValueError, match=r"\[0, 1000\]"):

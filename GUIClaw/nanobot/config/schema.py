@@ -461,6 +461,7 @@ class GuiConfig(Base):
     display_width: int = 1280
     display_height: int = 720
     image_scale_ratio: float = 0.5
+    history_image_window: int | None = None
     capture_ttft: bool = False
     reasoning_effort: str | None = None  # low / medium / high / adaptive - enables GUI LLM thinking mode
     enable_skill_extraction: bool = False
@@ -518,6 +519,13 @@ class GuiConfig(Base):
     def _validate_image_scale_ratio(cls, value: float) -> float:
         if not (0 < value <= 1):
             raise ValueError("image_scale_ratio must be in (0, 1].")
+        return value
+
+    @field_validator("history_image_window")
+    @classmethod
+    def _validate_history_image_window(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("history_image_window must be >= 1.")
         return value
 
     @field_validator("stagnation_limit")

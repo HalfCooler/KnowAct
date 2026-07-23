@@ -1627,6 +1627,7 @@ class GuiSubagentTool(Tool):
                     agent_profile=self._gui_config.agent_profile,
                     step_timeout=90.0,
                     image_scale_ratio=self._gui_config.image_scale_ratio,
+                    history_image_window=self._gui_config.history_image_window,
                 ),
                 screenshot_provider=_AgentScreenshotProvider(
                     backend=active_backend,
@@ -1656,6 +1657,7 @@ class GuiSubagentTool(Tool):
             intervention_handler=self._build_intervention_handler(active_backend, task),
             agent_profile=self._gui_config.agent_profile,
             image_scale_ratio=self._gui_config.image_scale_ratio,
+            history_image_window=self._gui_config.history_image_window,
             stagnation_limit=self._gui_config.stagnation_limit,
             enable_prompt_skill_selection=prompt_skill_selection_enabled,
             prompt_skill_top_k=self._gui_config.prompt_skill_top_k,
