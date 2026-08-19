@@ -310,7 +310,7 @@ If you use KnowAct-GUIClaw in research, please cite:
 
 ## Wechat
 
-<img width="1216" height="1485" alt="13010e95273700ac0073da0dca954171" src="https://github.com/user-attachments/assets/80322a1d-fe58-4c7e-9881-011e684c949d" />
+<img width="444" height="526" alt="截屏2026-08-19 10 19 30" src="https://github.com/user-attachments/assets/31058bb8-500c-4f14-b034-8a58fe4ba858" />
 
 
 
