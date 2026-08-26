@@ -121,6 +121,13 @@ class StepResult:
 
 
 @dataclass(frozen=True)
+class _InitialSkillSelection:
+    skill: Any
+    params: dict[str, str]
+    summary: str
+
+
+@dataclass(frozen=True)
 class HistoryTurn:
     """One completed step kept in the prompt history window."""
 
@@ -381,6 +388,9 @@ class GuiAgent:
         always_on_skill_tags: list[str] | tuple[str, ...] | None = None,
         skill_app_filter_enabled: bool = True,
         reasoning_effort: str | None = None,
+        initial_skill_selector_llm: LLMProvider | None = None,
+        enable_initial_skill_selector: bool = False,
+        initial_skill_top_k: int = 5,
     ) -> None:
         self.llm = llm
         self.backend = backend
@@ -411,6 +421,13 @@ class GuiAgent:
         self._policy_context = policy_context
         self._skill_library = skill_library
         self._skill_executor = skill_executor
+        self._initial_skill_selector_llm = initial_skill_selector_llm
+        self._enable_initial_skill_selector = bool(enable_initial_skill_selector)
+        try:
+            parsed_initial_skill_top_k = int(initial_skill_top_k)
+        except (TypeError, ValueError):
+            parsed_initial_skill_top_k = 5
+        self._initial_skill_top_k = max(0, parsed_initial_skill_top_k)
         self._memory_top_k = memory_top_k
         self._shortcuts: dict[str, AppShortcutProfile] = {}
         self._shortcut_backend = shortcut_backend
@@ -438,6 +455,7 @@ class GuiAgent:
             if str(tag)
         )
         self._prompt_skills_by_id: dict[str, Any] = {}
+        self._prompt_skill_scores_by_id: dict[str, float] = {}
         self._prompt_composite_aliases: set[str] = set()
         self._available_apps: tuple[str, ...] | None = None
         try:
@@ -544,7 +562,27 @@ class GuiAgent:
 
         skill_app_filter = self._skill_app_filter(task, app_hint)
         prompt_skill_parts: CompactPromptParts | None = None
-        if self._enable_prompt_skill_selection:
+        initial_skill_selection: _InitialSkillSelection | None = None
+        total_usage: dict[str, int] = {}
+        if self._enable_initial_skill_selector:
+            await self._build_prompt_skill_parts(
+                task,
+                app=skill_app_filter,
+                top_k=self._initial_skill_top_k,
+            )
+            candidates = list(self._prompt_skills_by_id.values())
+            initial_skill_selection, selector_usage = await self._select_initial_skill(
+                task,
+                candidates,
+            )
+            for key, value in selector_usage.items():
+                total_usage[key] = total_usage.get(key, 0) + value
+            # The initial selector owns skill choice for this run. Do not expose
+            # the catalog/use_skill action to the smaller GUI model afterward.
+            self._prompt_skills_by_id = {}
+            self._prompt_skill_scores_by_id = {}
+            self._prompt_composite_aliases = set()
+        elif self._enable_prompt_skill_selection:
             prompt_skill_parts = await self._build_prompt_skill_parts(
                 task,
                 app=skill_app_filter,
@@ -557,7 +595,6 @@ class GuiAgent:
         last_trace_path: str | None = None
         last_steps_taken = 0
         result: AgentResult | None = None
-        total_usage: dict[str, int] = {}
 
         for attempt in range(max_retries):
             run_dir = self._make_run_dir(task, attempt)
@@ -581,6 +618,9 @@ class GuiAgent:
                     run_dir=run_dir,
                     memory_context=memory_context,
                     prompt_skill_parts=prompt_skill_parts,
+                    initial_skill_selection=(
+                        initial_skill_selection if attempt == 0 else None
+                    ),
                 )
                 for k, v in result.token_usage.items():
                     total_usage[k] = total_usage.get(k, 0) + v
@@ -687,6 +727,7 @@ class GuiAgent:
         run_dir: Path,
         memory_context: str | None = None,
         prompt_skill_parts: CompactPromptParts | None = None,
+        initial_skill_selection: _InitialSkillSelection | None = None,
     ) -> AgentResult:
         """Execute one full attempt of the task."""
         # 1. Preflight
@@ -713,6 +754,40 @@ class GuiAgent:
         self._trajectory_recorder.record_screenshot(initial_screenshot, kind="initial")
 
         history: list[HistoryTurn] = []
+        total_usage: dict[str, int] = {}
+        if initial_skill_selection is not None:
+            initial_observation = obs
+            (
+                obs,
+                initial_skill_usage,
+                initial_skill_summary,
+                _,
+            ) = await self._execute_initial_skill(
+                initial_skill_selection,
+                current_observation=obs,
+                run_dir=run_dir,
+            )
+            for key, value in initial_skill_usage.items():
+                total_usage[key] = total_usage.get(key, 0) + value
+            if initial_skill_summary:
+                history.append(
+                    HistoryTurn(
+                        step_index=0,
+                        observation=initial_observation,
+                        assistant_message={
+                            "role": "assistant",
+                            "content": f"Action: {initial_skill_summary}",
+                        },
+                        tool_result_message={
+                            "role": "tool",
+                            "tool_call_id": "initial-skill",
+                            "content": None,
+                        },
+                        action_summary=initial_skill_summary,
+                        action_intent=initial_skill_summary,
+                        state_summary=initial_skill_summary,
+                    )
+                )
         previous_fingerprint: _ScreenFingerprint | None = None
         previous_action_type: str | None = None
         stagnation_streak = 0
@@ -721,7 +796,6 @@ class GuiAgent:
 
         # 4. Step loop
         steps_taken = 0
-        total_usage: dict[str, int] = {}
         for step in range(self.max_steps):
             step_index = step + 1
             messages = self._build_messages(
@@ -2056,6 +2130,7 @@ class GuiAgent:
         stable_required = self._POST_ACTION_STABILITY_FRAMES_REQUIRED
         last_observation: Observation | None = None
         deadline = time.monotonic() + window_seconds
+        foreground_app_change_settled = action is None or action.action_type == "open_app"
 
         for attempt in range(max_attempts):
             try:
@@ -2065,6 +2140,30 @@ class GuiAgent:
                 )
                 last_observation = observation
                 current_fingerprint = self._build_screen_fingerprint(observation)
+
+                if (
+                    not foreground_app_change_settled
+                    and self._foreground_app_changed(previous_observation, observation)
+                ):
+                    logger.debug(
+                        "Foreground app changed after %s (%r -> %r); waiting %.2fs",
+                        action.action_type if action is not None else "action",
+                        getattr(previous_observation, "foreground_app", None),
+                        observation.foreground_app,
+                        self._OPEN_APP_SETTLE_SECONDS,
+                    )
+                    await asyncio.sleep(self._OPEN_APP_SETTLE_SECONDS)
+                    foreground_app_change_settled = True
+                    previous_fingerprint = current_fingerprint
+                    try:
+                        observation = await self.backend.observe(
+                            screenshot_path,
+                            timeout=observe_timeout,
+                        )
+                        last_observation = observation
+                        current_fingerprint = self._build_screen_fingerprint(observation)
+                    except Exception:
+                        pass
 
                 if previous_fingerprint is not None and current_fingerprint is not None:
                     if self._is_same_screen(previous_fingerprint, current_fingerprint):
@@ -2088,6 +2187,23 @@ class GuiAgent:
         if last_observation is not None:
             return last_observation
         return None
+
+    def _foreground_app_changed(
+        self,
+        previous: Observation | None,
+        current: Observation | None,
+    ) -> bool:
+        if previous is None or current is None:
+            return False
+        previous_app = self._foreground_app_identity(previous.foreground_app)
+        current_app = self._foreground_app_identity(current.foreground_app)
+        return bool(previous_app and current_app and previous_app != current_app)
+
+    def _foreground_app_identity(self, app: str | None) -> str | None:
+        normalized = self._normalize_stagnation_app(app)
+        if normalized and self.backend.platform == "android":
+            return normalized.split("/", 1)[0]
+        return normalized
 
     def _build_screen_fingerprint(self, observation: Observation) -> _ScreenFingerprint | None:
         screenshot = observation.screenshot_path
@@ -2803,24 +2919,30 @@ class GuiAgent:
         # Fetch relevant entries by query
         results = await self._memory_retriever.search(task, top_k=self._memory_top_k + 10)
 
-        # Separate POLICY entries from search results
-        policies = [(e, s) for e, s in results if e.memory_type == MemoryType.POLICY]
+        # POLICY is injected independently through ``self._policy_context``.
+        # Only retrieve it here when that direct path is unavailable.
+        policies = (
+            []
+            if self._policy_context
+            else [(e, s) for e, s in results if e.memory_type == MemoryType.POLICY]
+        )
         others = [(e, s) for e, s in results if e.memory_type != MemoryType.POLICY][
             : self._memory_top_k
         ]
 
-        # Also fetch all POLICY entries separately (they must always be included)
-        policy_results = await self._memory_retriever.search(
-            task,
-            memory_type=MemoryType.POLICY,
-            top_k=50,
-        )
-        # Merge: add any POLICY entries not already in the list
-        seen_ids = {e.entry_id for e, _ in policies}
-        for entry, score in policy_results:
-            if entry.entry_id not in seen_ids:
-                policies.append((entry, score))
-                seen_ids.add(entry.entry_id)
+        if not self._policy_context:
+            # Without direct policy injection, fetch all POLICY entries so they
+            # remain present regardless of task relevance.
+            policy_results = await self._memory_retriever.search(
+                task,
+                memory_type=MemoryType.POLICY,
+                top_k=50,
+            )
+            seen_ids = {e.entry_id for e, _ in policies}
+            for entry, score in policy_results:
+                if entry.entry_id not in seen_ids:
+                    policies.append((entry, score))
+                    seen_ids.add(entry.entry_id)
 
         memory_entries = policies + others
         if not memory_entries:
@@ -2903,14 +3025,371 @@ class GuiAgent:
             return find_android_app_in_text(self._task_without_advisory_hints(task))
         return None
 
+    async def _select_initial_skill(
+        self,
+        task: str,
+        candidates: list[Any],
+    ) -> tuple[_InitialSkillSelection | None, dict[str, int]]:
+        """Ask the auxiliary text model to choose one retrieved skill or none."""
+        if self._initial_skill_selector_llm is None or not candidates:
+            self._trajectory_recorder.record_event(
+                "initial_skill_selection",
+                selected=False,
+                reason="no_selector" if self._initial_skill_selector_llm is None else "no_candidates",
+                candidate_skill_ids=[
+                    str(getattr(skill, "skill_id", "") or "") for skill in candidates
+                ],
+            )
+            return None, {}
+
+        tools: list[dict[str, Any]] = []
+        skills_by_tool: dict[str, Any] = {}
+        candidate_records: list[dict[str, Any]] = []
+        for index, skill in enumerate(candidates):
+            tool_name = f"skill_{index}"
+            skills_by_tool[tool_name] = skill
+            skill_id = str(getattr(skill, "skill_id", "") or "")
+            tags = {str(tag).strip().lower() for tag in (getattr(skill, "tags", ()) or ())}
+            is_deeplink = "deeplink" in tags or ":dl:" in skill_id
+            is_validated = "validated" in tags
+            kind = (
+                "validated deeplink"
+                if is_deeplink and is_validated
+                else "deeplink"
+                if is_deeplink
+                else "compact GUI skill"
+            )
+            parameters = _skill_param_names(skill)
+            required = _skill_required_param_names(skill)
+            properties = {
+                name: {
+                    "type": "string",
+                    "description": (
+                        "A concise search seed containing only the primary searchable "
+                        "target. Preserve exact quoted titles and names. Otherwise use "
+                        "the core person, topic, genre, or category, with at most one "
+                        "coarse content-type term. Exclude the app name, result attributes "
+                        "that must be verified later, and follow-up GUI actions."
+                        if name.strip().lower() in {"query", "keyword"}
+                        else f"Exact value for {name!r} inferred from the task."
+                    ),
+                }
+                for name in parameters
+            }
+            properties["handoff_summary"] = {
+                "type": "string",
+                "description": (
+                    "One short factual sentence describing only the selected skill's direct "
+                    "effect, assuming successful execution. Do not mention remaining "
+                    "requirements, follow-up actions, verification, task completion, or any "
+                    "action outside the skill."
+                ),
+            }
+            description = str(getattr(skill, "description", "") or "").strip()
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": (
+                            f"[{kind}] "
+                            f"{getattr(skill, 'name', skill_id)}: {description}"
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": properties,
+                            "required": [*required, "handoff_summary"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            )
+            candidate_records.append(
+                {
+                    "rank": index + 1,
+                    "tool": tool_name,
+                    "skill_id": skill_id,
+                    "skill_name": str(getattr(skill, "name", "") or ""),
+                    "description": description,
+                    "app": str(getattr(skill, "app", "") or ""),
+                    "tags": sorted(tags),
+                    "kind": kind,
+                    "score": self._prompt_skill_scores_by_id.get(skill_id),
+                    "parameters": parameters,
+                    "required": required,
+                }
+            )
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "no_skill",
+                    "description": (
+                        "Choose this when no candidate provides a correct and useful initial "
+                        "operation or when required arguments cannot be derived reliably."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        )
+        prompt = (
+            "Select exactly one candidate tool that performs a correct and useful initial "
+            "operation for the task. A skill does not need to finish the whole task. Prefer "
+            "a validated deeplink when it safely reaches a relevant state. Use no_skill "
+            "when no candidate is useful or its required arguments cannot be derived "
+            "reliably.\n\n"
+            "Argument rules:\n"
+            "1. Preserve exact quoted titles, names, people, identifiers, and user-provided "
+            "text.\n"
+            "2. For a search skill whose argument is query or keyword, treat it as a concise "
+            "retrieval seed rather than a restatement of the full task. Use the primary "
+            "searchable target and at most one coarse content-type term when needed. Exclude "
+            "the app/platform name, follow-up actions, and attributes that must be verified "
+            "from results (for example: 独播, 官方, 免费, 高分, 最新, 排名, 年份, or result "
+            "tags), unless they are part of an exact title or required to disambiguate "
+            "identical names. Do not invent a title or candidate.\n"
+            "3. For other arguments, use the narrowest value that faithfully preserves the "
+            "request. If an argument remains ambiguous, use no_skill.\n\n"
+            "Set handoff_summary to one short factual sentence describing only the selected "
+            "skill's direct effect, assuming successful execution. Do not mention remaining "
+            "requirements, follow-up actions, verification, task completion, or any action "
+            "outside the skill.\n\n"
+            f"Task: {self._task_without_advisory_hints(task)}"
+        )
+        self._trajectory_recorder.record_event(
+            "initial_skill_candidates",
+            query=self._task_without_advisory_hints(task),
+            top_k=self._initial_skill_top_k,
+            candidate_count=len(candidate_records),
+            candidates=candidate_records,
+        )
+        try:
+            response = await self._initial_skill_selector_llm.chat(
+                messages=[{"role": "user", "content": prompt}],
+                tools=tools,
+                tool_choice="required",
+                max_tokens=128,
+            )
+        except Exception as exc:
+            self._trajectory_recorder.record_event(
+                "initial_skill_selection",
+                selected=False,
+                reason="selector_error",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return None, {}
+
+        usage = {
+            str(key): int(value)
+            for key, value in (response.usage or {}).items()
+            if isinstance(value, int)
+        }
+        self._trajectory_recorder.record_event(
+            "initial_skill_model_response",
+            request={
+                "prompt": prompt,
+                "tool_choice": "required",
+                "max_tokens": 128,
+            },
+            model_output=self._snapshot_failed_model_response(response),
+            token_usage=usage,
+            ttft_s=response.ttft_s,
+            latency_s=response.latency_s,
+        )
+        if not response.tool_calls:
+            self._trajectory_recorder.record_event(
+                "initial_skill_selection",
+                selected=False,
+                reason="no_tool_call",
+                model_content=response.content,
+            )
+            return None, usage
+        tool_call = response.tool_calls[0]
+        if tool_call.name == "no_skill":
+            self._trajectory_recorder.record_event(
+                "initial_skill_selection",
+                selected=False,
+                reason="model_selected_none",
+            )
+            return None, usage
+        skill = skills_by_tool.get(tool_call.name)
+        if skill is None:
+            self._trajectory_recorder.record_event(
+                "initial_skill_selection",
+                selected=False,
+                reason="unknown_tool",
+                tool_name=tool_call.name,
+            )
+            return None, usage
+
+        raw_params = tool_call.arguments or {}
+        if not isinstance(raw_params, dict):
+            raw_params = {}
+        else:
+            raw_params = dict(raw_params)
+        raw_summary = raw_params.pop("handoff_summary", None)
+        parameter_names = set(_skill_param_names(skill))
+        unknown_params = sorted(str(key) for key in raw_params if str(key) not in parameter_names)
+        params = {
+            str(key): self._stringify_skill_argument(value)
+            for key, value in raw_params.items()
+            if str(key) in parameter_names
+        }
+        missing_params = _missing_skill_params(skill, params)
+        if unknown_params or missing_params:
+            self._trajectory_recorder.record_event(
+                "initial_skill_selection",
+                selected=False,
+                reason="invalid_arguments",
+                skill_id=str(getattr(skill, "skill_id", "") or ""),
+                missing_params=missing_params,
+                unknown_params=unknown_params,
+            )
+            return None, usage
+
+        summary = " ".join(str(raw_summary or response.content or "").split()).strip()
+        if not summary:
+            parameter_text = "，".join(f"{key}={value}" for key, value in params.items())
+            skill_label = str(getattr(skill, "name", "") or "所选")
+            summary = f"已使用 {skill_label} 技能"
+            if parameter_text:
+                summary += f"，参数为{parameter_text}"
+            summary += "。"
+
+        self._trajectory_recorder.record_event(
+            "initial_skill_selection",
+            selected=True,
+            tool_name=tool_call.name,
+            skill_id=str(getattr(skill, "skill_id", "") or ""),
+            skill_name=str(getattr(skill, "name", "") or ""),
+            arguments=params,
+            summary=summary,
+        )
+        return _InitialSkillSelection(
+            skill=skill,
+            params=params,
+            summary=summary,
+        ), usage
+
+    async def _execute_initial_skill(
+        self,
+        selection: _InitialSkillSelection,
+        *,
+        current_observation: Observation,
+        run_dir: Path,
+    ) -> tuple[Observation, dict[str, int], str | None, bool]:
+        """Execute the one-shot selected skill, then hand its latest state to the GUI loop."""
+        skill = selection.skill
+        skill_id = str(getattr(skill, "skill_id", "") or "")
+        skill_name = str(getattr(skill, "name", "") or skill_id)
+        if self._skill_executor is None:
+            self._trajectory_recorder.record_event(
+                "initial_skill_execution_result",
+                skill_id=skill_id,
+                skill_name=skill_name,
+                state="skipped",
+                error="no_skill_executor",
+            )
+            return current_observation, {}, None, False
+        if not _prompt_skill_entry_allows(skill, current_observation, selection.params):
+            self._trajectory_recorder.record_event(
+                "initial_skill_execution_result",
+                skill_id=skill_id,
+                skill_name=skill_name,
+                state="skipped",
+                error="entry_precondition_not_met",
+            )
+            return current_observation, {}, None, False
+
+        self._trajectory_recorder.set_phase(
+            ExecutionPhase.SKILL,
+            reason=f"Initial selector chose skill: {skill_name}",
+        )
+        try:
+            skill_result = await self._skill_executor.execute(
+                skill,
+                params=selection.params,
+                timeout=self.step_timeout,
+            )
+        except Exception as exc:
+            self._trajectory_recorder.record_event(
+                "initial_skill_execution_result",
+                skill_id=skill_id,
+                skill_name=skill_name,
+                state="failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            screenshot = run_dir / "screenshots" / "000_initial_skill_failed.png"
+            try:
+                failed_observation = await self.backend.observe(
+                    screenshot,
+                    timeout=self.step_timeout,
+                )
+            except Exception:
+                failed_observation = current_observation
+            else:
+                self._trajectory_recorder.record_screenshot(
+                    screenshot,
+                    kind="initial_skill_failed",
+                )
+            failed_summary = selection.summary.rstrip("。.!！ ")
+            return (
+                failed_observation,
+                {},
+                f"{failed_summary}，但技能执行失败，请根据当前页面继续。",
+                False,
+            )
+        finally:
+            self._trajectory_recorder.set_phase(
+                ExecutionPhase.AGENT,
+                reason="Initial selected skill finished",
+            )
+
+        usage = {
+            str(key): int(value)
+            for key, value in (getattr(skill_result, "token_usage", None) or {}).items()
+            if isinstance(value, int)
+        }
+        next_observation = self._observation_from_skill_result(skill_result)
+        if next_observation is None:
+            screenshot = run_dir / "screenshots" / "000_initial_skill.png"
+            next_observation = await self.backend.observe(
+                screenshot,
+                timeout=self.step_timeout,
+            )
+            self._trajectory_recorder.record_screenshot(screenshot, kind="initial_skill")
+        state = str(getattr(getattr(skill_result, "state", None), "value", "") or "unknown")
+        self._trajectory_recorder.record_event(
+            "initial_skill_execution_result",
+            skill_id=skill_id,
+            skill_name=skill_name,
+            state=state,
+            error=getattr(skill_result, "error", None),
+            summary=getattr(skill_result, "execution_summary", "") or "",
+            handoff_summary=selection.summary,
+        )
+        handoff_summary = selection.summary
+        if state != "succeeded":
+            failed_summary = selection.summary.rstrip("。.!！ ")
+            handoff_summary = (
+                f"{failed_summary}，但技能执行未成功，请根据当前页面继续。"
+            )
+        return next_observation, usage, handoff_summary, state == "succeeded"
+
     async def _build_prompt_skill_parts(
         self,
         task: str,
         *,
         app: str | None = None,
+        top_k: int | None = None,
     ) -> CompactPromptParts:
         """Retrieve prompt-visible skills and always-on composite actions."""
         self._prompt_skills_by_id = {}
+        self._prompt_skill_scores_by_id = {}
         self._prompt_composite_aliases = set()
         if self._skill_library is None:
             self._trajectory_recorder.record_event(
@@ -2935,13 +3414,14 @@ class GuiAgent:
         self._prompt_composite_aliases = {action.alias for action in composite_actions}
 
         skill_query = self._task_without_advisory_hints(task)
+        result_limit = self._prompt_skill_top_k if top_k is None else max(0, int(top_k))
         retrieved_infos = []
-        if self._prompt_skill_top_k > 0:
+        if result_limit > 0:
             search_k = max(
-                self._prompt_skill_top_k,
-                self._prompt_skill_top_k * 5
+                result_limit,
+                result_limit * 5
                 if self._prompt_shortcut_only or self._always_on_skill_tags
-                else self._prompt_skill_top_k,
+                else result_limit,
             )
             results = await self._skill_library.search(
                 skill_query,
@@ -2949,7 +3429,7 @@ class GuiAgent:
                 app=app,
                 top_k=search_k,
             )
-            for skill, _score in results:
+            for skill, score in results:
                 if is_always_on_skill(skill, self._always_on_skill_tags):
                     continue
                 if self._prompt_shortcut_only and not is_shortcut_skill(skill):
@@ -2958,8 +3438,9 @@ class GuiAgent:
                 if not skill_id:
                     continue
                 self._prompt_skills_by_id[skill_id] = skill
+                self._prompt_skill_scores_by_id[skill_id] = float(score)
                 retrieved_infos.append(skill_info_from_flat_skill(skill))
-                if len(retrieved_infos) >= self._prompt_skill_top_k:
+                if len(retrieved_infos) >= result_limit:
                     break
 
         parts = build_compact_prompt_parts(

@@ -201,6 +201,8 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert cfg.history_image_window is None
     assert cfg.stagnation_limit == 0
     assert cfg.enable_skill_execution is False
+    assert cfg.enable_initial_skill_selector is False
+    assert cfg.initial_skill_top_k == 5
     assert cfg.enable_skill_extraction is False
     assert cfg.enable_memory_extraction is False
 
@@ -246,6 +248,8 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
         history_image_window: 3
         stagnation_limit: 3
         enable_skill_execution: true
+        enable_initial_skill_selector: true
+        initial_skill_top_k: 7
         enable_skill_extraction: true
         enable_memory_extraction: true
         """,
@@ -255,6 +259,8 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert scaled.history_image_window == 3
     assert scaled.stagnation_limit == 3
     assert scaled.enable_skill_execution is True
+    assert scaled.enable_initial_skill_selector is True
+    assert scaled.initial_skill_top_k == 7
     assert scaled.enable_skill_extraction is True
     assert scaled.enable_memory_extraction is True
 
@@ -341,6 +347,8 @@ async def test_openai_provider_forwards_optional_sampling_values(
             self.chat = types.SimpleNamespace(completions=FakeCompletions())
 
     monkeypatch.setattr(cli, "AsyncOpenAI", FakeAsyncOpenAI)
+    clock = iter((10.0, 10.25))
+    monkeypatch.setattr(cli.time, "perf_counter", lambda: next(clock))
     provider = cli.OpenAICompatibleLLMProvider(
         base_url="http://localhost:8000/v1",
         model="gui-owl",
@@ -348,10 +356,11 @@ async def test_openai_provider_forwards_optional_sampling_values(
         top_p=0.8,
     )
 
-    await provider.chat([{"role": "user", "content": "test"}])
+    response = await provider.chat([{"role": "user", "content": "test"}])
 
     assert captured["temperature"] == pytest.approx(0.2)
     assert captured["top_p"] == pytest.approx(0.8)
+    assert response.latency_s == pytest.approx(0.25)
 
 
 @pytest.mark.asyncio
@@ -664,6 +673,8 @@ def test_standalone_cli_runs_enabled_postprocessing_before_return(
         memory_dir=tmp_path / "memory",
         skills_dir=tmp_path / "skill",
         enable_skill_execution=True,
+        enable_initial_skill_selector=True,
+        initial_skill_top_k=5,
         enable_skill_extraction=True,
         enable_memory_extraction=True,
     )
@@ -727,7 +738,10 @@ def test_standalone_cli_runs_enabled_postprocessing_before_return(
 
     assert result.success is True
     assert postprocess_state["components_embedding"] is embedding_provider
-    assert agent_state["enable_prompt_skill_selection"] is True
+    assert agent_state["enable_prompt_skill_selection"] is False
+    assert agent_state["enable_initial_skill_selector"] is True
+    assert agent_state["initial_skill_selector_llm"] is postprocess_provider
+    assert agent_state["initial_skill_top_k"] == 5
     assert postprocess_state["init"] == {
         "llm": postprocess_provider,
         "merge_llm": postprocess_provider,

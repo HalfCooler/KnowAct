@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from guiclaw.trajectory.recorder import TrajectoryRecorder
 EXPECTED_PROFILES = (
     "default",
     "general_e2e",
+    "general_compact",
     "gui_owl",
     "venus",
     "seed",
@@ -78,6 +80,434 @@ def test_default_coordinate_mode_preserves_opencua_model_hints() -> None:
     assert coordinate_mode_for_profile("default", "qwen-vl-max") == "relative_999"
     assert coordinate_mode_for_profile("default", "gemini-2.5-pro") == "relative_999"
     assert coordinate_mode_for_profile("general_e2e", "qwen-vl-max") == "absolute"
+
+
+def test_general_compact_uses_rolling_memory_contract(tmp_path: Path) -> None:
+    messages = build_profile_messages(
+        "general_compact",
+        task="Open Settings",
+        current_observation=_observation(tmp_path / "compact.png"),
+        history=[],
+        model_name="qwen3.5-4b",
+        history_image_window=1,
+    )
+
+    system_prompt = messages[0]["content"]
+    assert "只能是一个 JSON 对象" in system_prompt
+    assert "action_type" in system_prompt
+    assert "顶层必须同时包含 action_type 和 memory" in system_prompt
+    assert (
+        '{"action_type":"click","coordinate":[500,300],"memory":'
+        '{"current":"当前页面/任务状态","remaining":"原始任务中尚未完成的事项"}}'
+        in system_prompt
+    )
+    assert "原始任务定义唯一目标" in system_prompt
+    assert "当前截图只用于验证状态和定位控件" in system_prompt
+    assert "不得从结果页控件推导新目标" in system_prompt
+    assert "截图验证全部明确要求后禁止继续操作" in system_prompt
+    assert "只能 answer/status" in system_prompt
+    assert "remaining 只写原始任务中明确且尚未完成的事项" in system_prompt
+    assert "没有则写“无”并立即结束" in system_prompt
+    assert 'memory.remaining="无" 时只能 answer/status' in system_prompt
+    assert "其他动作的 remaining 不得为“无”" in system_prompt
+    assert "长度为 2 的数值数组" in system_prompt
+    assert '"x"/"y"' in system_prompt
+    assert "禁止 name/message/data/position 等其他 schema" in system_prompt
+    assert 'add:["事实｜来源=页面路径"]' in system_prompt
+    assert "禁止在 add 中重复" in system_prompt
+    assert "同轮 add 修正事实" in system_prompt
+    assert "duration_ms=1000|3000|5000|10000|30000|60000" in system_prompt
+    assert "Thought:" not in system_prompt
+    assert "<tool_call>" not in system_prompt
+    assert len(system_prompt) < 1_200
+    assert messages[1]["content"][0]["text"] == "Instruction: Open Settings"
+
+
+def test_general_compact_scales_images_without_changing_general_e2e(
+    tmp_path: Path,
+) -> None:
+    screenshot = tmp_path / "general-scale.png"
+    Image.new("RGB", (1080, 2376), "white").save(screenshot)
+    observation = Observation(
+        screenshot_path=str(screenshot),
+        screen_width=1080,
+        screen_height=2376,
+        foreground_app="Settings",
+        platform="android",
+    )
+
+    compact_messages = build_profile_messages(
+        "general_compact",
+        task="Open Settings",
+        current_observation=observation,
+        history=[],
+        model_name="qwen3.5-4b",
+        history_image_window=1,
+        image_scale_ratio=0.33,
+    )
+    general_messages = build_profile_messages(
+        "general_e2e",
+        task="Open Settings",
+        current_observation=observation,
+        history=[],
+        model_name="qwen3.5-4b",
+        history_image_window=1,
+        image_scale_ratio=0.33,
+    )
+
+    def transmitted_size(messages: list[dict]) -> tuple[int, int]:
+        data_url = messages[1]["content"][-1]["image_url"]["url"]
+        with Image.open(BytesIO(base64.b64decode(data_url.split(",", 1)[1]))) as image:
+            return image.size
+
+    assert transmitted_size(compact_messages) == (356, 784)
+    assert transmitted_size(general_messages) == (1080, 2376)
+    assert "0-1000" in compact_messages[0]["content"]
+
+
+def test_general_compact_parses_bare_json_with_general_dispatch_contract() -> None:
+    memory = (
+        "已完成/事实：搜索页面已打开；当前：搜索框可见；"
+        "剩余/约束：输入关键词并提交搜索"
+    )
+    payload = parse_profile_action(
+        "general_compact",
+        f'{{"memory":"{memory}","action_type":"click",'
+        '"coordinate":[500,250]}',
+        screen_width=1080,
+        screen_height=2400,
+        model_name="qwen3.5-4b",
+    )
+
+    assert payload["action_type"] == "tap"
+    assert payload["x"] == 540
+    assert payload["y"] == 600
+    assert payload["intent"] == memory
+    assert payload["summary"] == memory
+
+
+def test_general_compact_rejects_placeholder_click_coordinates() -> None:
+    response = {
+        "action_type": "click",
+        "coordinate": ["x", "y"],
+        "memory": {"current": "搜索结果页", "remaining": "点击结果"},
+    }
+
+    with pytest.raises(ValueError, match="Error parsing action"):
+        parse_profile_action(
+            "general_compact",
+            json.dumps(response, ensure_ascii=False),
+            screen_width=1080,
+            screen_height=2400,
+            model_name="qwen3.5-4b",
+        )
+
+
+def test_general_compact_preserves_selected_wait_duration() -> None:
+    memory = {
+        "current": "广告仍在播放且没有关闭按钮",
+        "remaining": "等待广告结束后继续原任务",
+    }
+    payload = parse_profile_action(
+        "general_compact",
+        json.dumps(
+            {"memory": memory, "action_type": "wait", "duration_ms": 30000},
+            ensure_ascii=False,
+        ),
+        screen_width=1080,
+        screen_height=2400,
+        model_name="qwen3.5-4b",
+    )
+
+    assert payload == {
+        "summary": "当前：广告仍在播放且没有关闭按钮；剩余/约束：等待广告结束后继续原任务",
+        "intent": "当前：广告仍在播放且没有关闭按钮；剩余/约束：等待广告结束后继续原任务",
+        "action_type": "wait",
+        "duration_ms": 30000,
+    }
+
+
+def test_general_compact_normalizes_flat_memory_but_still_requires_action(
+    tmp_path: Path,
+) -> None:
+    flat_response = {
+        "current": "收藏页面显示第一张专辑怪咖",
+        "remaining": "进入专辑页并播放第一首歌曲",
+        "add": ["第一张收藏专辑=怪咖｜来源=我的收藏/专辑列表第1项"],
+        "action_type": "click",
+        "coordinate": [500, 600],
+    }
+    payload = parse_profile_action(
+        "general_compact",
+        json.dumps(flat_response, ensure_ascii=False),
+        screen_width=1080,
+        screen_height=2400,
+        model_name="qwen3.5-4b",
+    )
+
+    assert payload["action_type"] == "tap"
+    assert payload["summary"] == (
+        "新增锁定：第一张收藏专辑=怪咖｜来源=我的收藏/专辑列表第1项；"
+        "当前：收藏页面显示第一张专辑怪咖；剩余/约束：进入专辑页并播放第一首歌曲"
+    )
+
+    observation = _observation(tmp_path / "compact-flat-memory.png")
+    history = [
+        SimpleNamespace(
+            observation=observation,
+            action_summary="click",
+            action_intent=payload["intent"],
+            state_summary=payload["summary"],
+            tool_result_message={"content": None},
+            raw_response_content=json.dumps(flat_response, ensure_ascii=False),
+            assistant_message={"content": ""},
+        )
+    ]
+    messages = build_profile_messages(
+        "general_compact",
+        task="播放第一张收藏专辑的第一首歌",
+        current_observation=observation,
+        history=history,
+        model_name="qwen3.5-4b",
+        history_image_window=1,
+    )
+    memory_state = messages[1]["content"][0]["text"]
+    assert "第一张收藏专辑=怪咖｜来源=我的收藏/专辑列表第1项" in memory_state
+    assert "当前：收藏页面显示第一张专辑怪咖" in memory_state
+
+    del flat_response["action_type"]
+    with pytest.raises(ValueError, match="Error parsing action"):
+        parse_profile_action(
+            "general_compact",
+            json.dumps(flat_response, ensure_ascii=False),
+            screen_width=1080,
+            screen_height=2400,
+            model_name="qwen3.5-4b",
+        )
+
+
+@pytest.mark.parametrize("history_image_window", [1, 2, 3, 5])
+def test_general_compact_uses_only_current_image_and_merged_memory(
+    tmp_path: Path,
+    history_image_window: int,
+) -> None:
+    observations = [
+        _observation(tmp_path / f"compact-history-{history_image_window}-{index}.png")
+        for index in range(4)
+    ]
+    memory_updates = [
+        {
+            "add": ["第一张收藏专辑=怪咖-薛之谦｜来源=我的收藏/专辑列表第1项"],
+            "current": "收藏列表",
+            "remaining": "进入第一张专辑",
+        },
+        {
+            "add": ["目标首曲=摩天大楼｜来源=怪咖曲目列表第1项"],
+            "current": "怪咖曲目列表",
+            "remaining": "播放目标首曲",
+        },
+        {
+            "current": "会员弹窗覆盖专辑页",
+            "remaining": "关闭弹窗→播放摩天大楼→验证播放状态",
+        },
+    ]
+    history = []
+    for index, memory in enumerate(memory_updates):
+        history.append(
+            SimpleNamespace(
+                observation=observations[index],
+                action_summary=f"Action {index + 1}",
+                action_intent="unused intent",
+                state_summary="unused summary",
+                tool_result_message={"content": None},
+                raw_response_content=json.dumps(
+                    {
+                        "memory": memory,
+                        "action_type": "click",
+                        "coordinate": [500, 500],
+                    },
+                    ensure_ascii=False,
+                ),
+                assistant_message={"content": ""},
+            )
+        )
+
+    messages = build_profile_messages(
+        "general_compact",
+        task="Open Settings",
+        current_observation=observations[-1],
+        history=history,
+        model_name="qwen3.5-4b",
+        history_image_window=history_image_window,
+    )
+
+    image_blocks = [
+        block
+        for message in messages
+        if isinstance(message["content"], list)
+        for block in message["content"]
+        if block.get("type") == "image_url"
+    ]
+    first_user_text = messages[1]["content"][0]["text"]
+    assert len(messages) == 2
+    assert len(image_blocks) == 1
+    assert all(message["role"] != "assistant" for message in messages)
+    assert "Memory state:" in first_user_text
+    assert "第一张收藏专辑=怪咖-薛之谦｜来源=我的收藏/专辑列表第1项" in first_user_text
+    assert "目标首曲=摩天大楼｜来源=怪咖曲目列表第1项" in first_user_text
+    assert first_user_text.count("第一张收藏专辑=") == 1
+    assert "当前：会员弹窗覆盖专辑页" in first_user_text
+    assert "剩余：关闭弹窗→播放摩天大楼→验证播放状态" in first_user_text
+    assert "当前：收藏列表" not in first_user_text
+    assert "当前：怪咖曲目列表" not in first_user_text
+    assert "Step 1" not in first_user_text
+    assert "action_type" not in first_user_text
+    assert "coordinate" not in first_user_text
+
+
+def test_general_compact_history_falls_back_without_raw_action_details(
+    tmp_path: Path,
+) -> None:
+    observations = [
+        _observation(tmp_path / f"compact-intent-fallback-{index}.png")
+        for index in range(2)
+    ]
+    history = [
+        SimpleNamespace(
+            observation=observations[0],
+            action_summary="tap at (540, 600)",
+            action_intent="打开搜索页面",
+            tool_result_message={"content": None},
+            raw_response_content='{"action_type":"click","coordinate":[500,250]}',
+            assistant_message={"content": ""},
+        )
+    ]
+
+    messages = build_profile_messages(
+        "general_compact",
+        task="Search for Andy Lau",
+        current_observation=observations[1],
+        history=history,
+        model_name="qwen3.5-4b",
+        history_image_window=2,
+    )
+
+    history_text = messages[1]["content"][0]["text"]
+    assert "Memory state:" in history_text
+    assert "已确认/锁定：\n- 打开搜索页面" in history_text
+    assert "540" not in history_text
+    assert "coordinate" not in history_text
+
+
+def test_general_compact_accepts_legacy_result_and_intent_fields() -> None:
+    payload = parse_profile_action(
+        "general_compact",
+        '{"result":"搜索页已打开","intent":"点击搜索框",'
+        '"action_type":"click","coordinate":[500,250]}',
+        screen_width=1080,
+        screen_height=2400,
+        model_name="qwen3.5-4b",
+    )
+
+    assert payload["summary"] == "搜索页已打开"
+    assert payload["intent"] == "点击搜索框"
+
+
+def test_general_compact_locked_memory_is_monotonic_and_exactly_correctable(
+    tmp_path: Path,
+) -> None:
+    observations = [
+        _observation(tmp_path / f"compact-correction-{index}.png") for index in range(4)
+    ]
+    old_fact = "目标首曲=摩天大楼｜来源=怪咖曲目列表第1项"
+    corrected_fact = "目标首曲=像风一样｜来源=怪咖曲目列表第1项"
+    updates = [
+        {"add": [old_fact], "current": "专辑页", "remaining": "播放首曲"},
+        {"drop": ["目标首曲=摩天大楼"], "current": "弹窗", "remaining": "关闭弹窗"},
+        {
+            "drop": [old_fact],
+            "add": [corrected_fact],
+            "current": "专辑页",
+            "remaining": "播放修正后的首曲",
+        },
+    ]
+    history = [
+        SimpleNamespace(
+            observation=observations[index],
+            action_summary="click",
+            action_intent="unused",
+            state_summary="unused",
+            tool_result_message={"content": None},
+            raw_response_content=json.dumps(
+                {"memory": update, "action_type": "click", "coordinate": [500, 500]},
+                ensure_ascii=False,
+            ),
+            assistant_message={"content": ""},
+        )
+        for index, update in enumerate(updates)
+    ]
+
+    messages = build_profile_messages(
+        "general_compact",
+        task="播放第一张收藏专辑的第一首歌",
+        current_observation=observations[-1],
+        history=history,
+        model_name="qwen3.5-4b",
+        history_image_window=1,
+    )
+
+    memory_state = messages[1]["content"][0]["text"]
+    assert old_fact not in memory_state
+    assert memory_state.count(corrected_fact) == 1
+
+
+def test_general_compact_uses_low_latency_llm_defaults() -> None:
+    assert profile_llm_defaults("general_compact") == {
+        "reasoning_effort": "none",
+        "max_tokens": 256,
+    }
+
+
+def test_general_compact_injects_optional_skill_catalog(tmp_path: Path) -> None:
+    skill_id = "shortcut:dl:com.qiyi.video:search"
+    messages = build_profile_messages(
+        "general_compact",
+        task="用爱奇艺查询刘德华的电影。",
+        current_observation=_observation(tmp_path / "compact-skill.png"),
+        history=[],
+        model_name="qwen3.5-4b",
+        history_image_window=1,
+        compact_prompt_parts=CompactPromptParts(
+            action_rows=(
+                '| `use_skill` | Run a matching skill | '
+                '`{"action_type":"use_skill","skill_id":"listed_skill_id",'
+                '"arguments":{}}` |'
+            ),
+            compact_skill_instructions=(
+                "Compact skills:\n"
+                f"- skill_id={skill_id}; name=iqiyi_search; parameters=query"
+            ),
+            skill_ids=(skill_id,),
+        ),
+    )
+
+    system_prompt = messages[0]["content"]
+    assert "use_skill" in system_prompt
+    assert skill_id in system_prompt
+
+    payload = parse_profile_action(
+        "general_compact",
+        (
+            '{"action_type":"use_skill","skill_id":"'
+            f'{skill_id}","arguments":{{"query":"刘德华"}}}}'
+        ),
+        screen_width=1080,
+        screen_height=2376,
+        model_name="qwen3.5-4b",
+    )
+    assert payload["action_type"] == "use_skill"
+    assert payload["skill_id"] == skill_id
+    assert payload["arguments"] == {"query": "刘德华"}
 
 
 def _observation(path: Path) -> Observation:
@@ -158,6 +588,32 @@ def test_gui_owl_messages_match_official_history_and_image_contract(tmp_path: Pa
         len(message["content"]) == 1 and message["content"][0]["type"] == "image_url"
         for message in messages[3::2]
     )
+
+
+def test_gui_owl_prompt_includes_retrieved_skill_contract(tmp_path: Path) -> None:
+    skill_id = "shortcut:dl:com.qiyi.video:search"
+    messages = build_profile_messages(
+        "gui_owl",
+        task="Search iQIYI for Andy Lau",
+        current_observation=_observation(tmp_path / "gui-owl-skill.png"),
+        history=[],
+        model_name="mPLUG/GUI-Owl-1.5-8B-Instruct",
+        history_image_window=1,
+        compact_prompt_parts=CompactPromptParts(
+            compact_skill_instructions="unused general_e2e instructions",
+            skill_ids=(skill_id,),
+            catalog=(
+                f"- skill_id={skill_id}; skill_name=iqiyi_search; "
+                "description=Search iQIYI; parameters=query"
+            ),
+        ),
+    )
+
+    system_prompt = messages[0]["content"]
+    assert '"name": "use_skill"' in system_prompt
+    assert skill_id in system_prompt
+    assert "parameters=query" in system_prompt
+    assert "before manual navigation" in system_prompt
 
 
 @pytest.mark.parametrize("history_image_window", [1, 2, 3, 5])
@@ -354,6 +810,27 @@ Action: "Tap the center"
             screen_width=1080,
             screen_height=1920,
         )
+
+
+def test_gui_owl_parses_use_skill_tool_call() -> None:
+    skill_id = "shortcut:dl:com.qiyi.video:search"
+    content = f"""
+Action: "Search iQIYI with the retrieved shortcut"
+<tool_call>
+{{"name":"use_skill","arguments":{{"skill_id":"{skill_id}","arguments":{{"query":"刘德华"}}}}}}
+</tool_call>
+"""
+
+    payload = parse_profile_action(
+        "gui_owl",
+        content,
+        screen_width=1080,
+        screen_height=1920,
+    )
+
+    assert payload["action_type"] == "use_skill"
+    assert payload["skill_id"] == skill_id
+    assert payload["arguments"] == {"query": "刘德华"}
 
 
 def test_legacy_gui_plus_maps_smart_resized_pixels_to_device_screen() -> None:

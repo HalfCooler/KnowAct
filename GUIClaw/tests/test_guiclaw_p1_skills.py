@@ -15,7 +15,7 @@ from guiclaw.backends.dry_run import DryRunBackend
 from guiclaw.interfaces import LLMResponse
 from guiclaw.observation import Observation
 from guiclaw.skills.data import Skill, SkillStep
-from guiclaw.skills.executor import ExecutionState, SkillExecutor, SubgoalResult
+from guiclaw.skills.executor import ExecutionState, SkillExecutor, StepResult, SubgoalResult
 from guiclaw.skills.extractor import SkillExtractor
 from guiclaw.skills.flat import FlatSkillLibrary, compile_flat_skills
 from guiclaw.skills.normalization import normalize_app_identifier
@@ -1494,6 +1494,43 @@ def test_build_failure_case_ignores_failed_result_without_skill_id(tmp_path: Pat
     )
 
     assert failure_case is None
+
+
+def test_skill_executor_records_validation_and_grounding_inference_times(
+    tmp_path: Path,
+) -> None:
+    events: list[dict[str, Any]] = []
+    recorder = TrajectoryRecorder(
+        output_dir=tmp_path,
+        task="timed skill",
+        platform="android",
+        event_callback=events.append,
+    )
+    recorder.start()
+    step = SkillStep(action_type="tap", target="result", valid_state="result is visible")
+    skill = _make_skill("skill-1", "timed_skill", "Timed skill", steps=(step,))
+    executor = SkillExecutor(
+        backend=_RecordingBackend(),
+        trajectory_recorder=recorder,
+    )
+    executor._record_skill_step(
+        skill,
+        step,
+        StepResult(
+            step_index=0,
+            action=Action(action_type="tap", x=100, y=200),
+            backend_result="tap",
+            state=ExecutionState.SUCCEEDED,
+            grounding_mode="llm",
+            validate_duration_s=0.1,
+            grounding_duration_s=0.35,
+        ),
+    )
+
+    event = next(item for item in events if item["type"] == "skill_step")
+    assert event["inference_time_s"] == pytest.approx(0.45)
+    assert event["validate_inference_time_s"] == pytest.approx(0.1)
+    assert event["grounding_inference_time_s"] == pytest.approx(0.35)
 
 
 @pytest.mark.asyncio

@@ -396,7 +396,13 @@ class FlatSkillLibrary:
         self.refresh_if_stale()
 
     def list_all(self, *, platform: str | None = None, app: str | None = None) -> list[Skill]:
-        return self._repository.list_all(platform=platform, app=app)
+        # Keep ``skills.py`` canonical and materialize reversible shortcut
+        # compositions only at the public read boundary.  Repository writes
+        # below intentionally continue to operate on raw skills.
+        from guiclaw.skills.optimizer import SkillOptimizationStore, apply_skill_optimizations
+
+        raw_skills = self._repository.list_all(platform=platform, app=app)
+        return apply_skill_optimizations(raw_skills, SkillOptimizationStore(self.store_dir))
 
     def count(self) -> int:
         return len(self.list_all())
@@ -765,6 +771,38 @@ class FlatSkillLibrary:
             if evolved:
                 record["evolution_count"] = int(record.get("evolution_count") or 0) + 1
             self._write_feedback(feedback)
+
+    async def optimize_shortcut_prefixes(
+        self,
+        *,
+        focus_skill_ids: list[str] | tuple[str, ...] | None = None,
+        persist: bool = True,
+        embedding_top_k: int = 3,
+        validator: Any | None = None,
+    ) -> dict[str, Any]:
+        """Discover and persist reversible shortcut-prefix compositions."""
+        from guiclaw.skills.optimizer import optimize_shortcut_prefixes
+
+        with self._store_lock:
+            raw_skills = self._repository.list_all()
+        if self.embedding_provider is None:
+            cached = self._cached_skill_embedding_map(raw_skills)
+            if len(cached) != len(raw_skills):
+                return {"status": "skipped_no_embeddings", "candidate_count": 0}
+            embeddings = np.vstack([cached[skill.skill_id] for skill in raw_skills])
+        else:
+            embeddings = await self._ensure_skill_embeddings(raw_skills)
+        return await optimize_shortcut_prefixes(
+            raw_skills,
+            embeddings=embeddings,
+            store_dir=self.store_dir,
+            llm=self.merge_llm,
+            focus_skill_ids=focus_skill_ids,
+            persist=persist,
+            embedding_top_k=embedding_top_k,
+            validator=validator,
+            delete_skill=self.remove,
+        )
 
     def update(self, skill_id: str, updated_skill: Skill) -> bool:
         with self._store_lock:

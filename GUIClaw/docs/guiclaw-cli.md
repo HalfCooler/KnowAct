@@ -223,7 +223,7 @@ sections are rejected when they affect a supported field.
 | `embedding.api_key` | provider key | Separate embedding key. |
 | `max_steps` | `15` | Maximum GUI decision steps. Must be positive. |
 | `stagnation_limit` | `0` | Repeated-screen limit; `0` disables the detector. |
-| `image_scale_ratio` | `0.5` | Screenshot scale in `(0, 1]` for model and validation calls. GUI-Owl applies this scale before its factor-28 smart resize. |
+| `image_scale_ratio` | `0.5` | Screenshot scale in `(0, 1]` for model and validation calls. `general_compact` resizes directly; GUI-Owl applies the scale before factor-28 smart resize. |
 | `history_image_window` | profile default | Total screenshot count including the current frame. Unset keeps each profile's default; GUI-Owl uses 5. Set `1` for current-frame-only input. |
 | `agent_profile` | `default` | Prompt and action contract. |
 | `memory_dir` | `~/.guiclaw/memory` | Policy and extracted-memory storage. Retrieval additionally requires `embedding`. |
@@ -384,6 +384,7 @@ The adapter also uses the shared `POLICY` entries in
 | --- | --- |
 | `default` | Provider-native OpenAI-style tool calls. |
 | `general_e2e` | MobileWorld GeneralE2E JSON action text. |
+| `general_compact` | Low-latency, JSON-only actions for general vision-language models. |
 | `gui_owl` | GUI-Owl action format. |
 | `venus` | UI-Venus action format. |
 | `seed` | Seed XML-style function calls. |
@@ -391,8 +392,11 @@ The adapter also uses the shared `POLICY` entries in
 | `mai_ui` | MAI-UI action format. |
 | `gelab` | GELab tab-separated action format. |
 
-Use `default` for models with reliable native function calling. Select another
-profile only when the model is trained or prompted for that exact format.
+Use `default` for models with reliable native function calling. Use
+`general_compact` for general vision-language models where prompt and output
+latency matter; it honors `history_image_window` and keeps the most recent N
+screenshots. Select another profile only when the model is trained or prompted
+for that exact format.
 
 ## Backends
 
@@ -505,6 +509,29 @@ extracted skills in `~/.guiclaw/skill/skills.py`.
 | `--llm-api-key-env NAME` | `OPENAI_API_KEY` | Environment variable holding the verifier key. |
 | `--llm-temperature FLOAT` | `0.0` | Verifier temperature. |
 | `--shortcut-postprocess {off,rules,llm}` | `rules` | Normalize and deduplicate promoted records; `llm` also refines names and descriptions. |
+
+### Optimize UI skills with shortcuts
+
+```bash
+guiclaw skills optimize --all --dry-run \
+  --report /tmp/skill-optimization-report.json
+```
+
+The optimizer reads `postprocess_provider` and `embedding` from
+`~/.guiclaw/config.yaml`. It reuses `skills_embeddings.npy` and only calls the
+embedding provider for missing rows. Within each app, the nearest deeplink
+skills are sent to the post-processing model, which may replace a UI prefix,
+delete a fully covered UI skill, or keep it unchanged. Use
+`--validate --promote` to execute accepted changes on an ADB device first.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--config PATH` | `~/.guiclaw/config.yaml` | Provider configuration. |
+| `--embedding-top-k N` | `3` | Related shortcuts sent to the LLM per UI skill. |
+| `--dry-run` | on | Report proposals without persisting recipes. |
+| `--apply` | off | Persist structurally valid recipes without device validation. |
+| `--validate --promote` | off | Persist only recipes that pass device execution and final-page verification. |
+| `--llm-base-url`, `--llm-model` | config values | Override the post-processing provider. |
 
 ## Data directories
 

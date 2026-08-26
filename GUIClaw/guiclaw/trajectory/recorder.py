@@ -136,6 +136,7 @@ class TrajectoryRecorder:
         if self._closed:
             raise RuntimeError("Recorder already closed")
         self._capture_skill_event(event_type, payload)
+        self._capture_initial_skill_selector_event(event_type, payload)
         self._emit(
             {
                 "type": event_type,
@@ -145,6 +146,48 @@ class TrajectoryRecorder:
                 **payload,
             }
         )
+
+    def _capture_initial_skill_selector_event(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        field_by_event = {
+            "initial_skill_candidates": "candidates",
+            "initial_skill_model_response": "model_response",
+            "initial_skill_selection": "selection",
+            "initial_skill_execution_result": "execution_result",
+        }
+        field = field_by_event.get(event_type)
+        if field is None:
+            return
+
+        trajectory = self._require_trajectory()
+        selectors = trajectory.setdefault("initial_skill_selectors", [])
+        selector = next(
+            (
+                item
+                for item in selectors
+                if item.get("subtask") == self.subtask_index
+                and item.get("attempt") == self._attempt
+            ),
+            None,
+        )
+        if selector is None:
+            selector = {
+                "subtask": self.subtask_index,
+                "attempt": self._attempt,
+            }
+            selectors.append(selector)
+        captured = dict(payload)
+        if event_type == "initial_skill_execution_result":
+            for detail_key in ("steps", "subgoal_steps"):
+                details = self._pending_skill.get(detail_key)
+                if isinstance(details, list) and details:
+                    captured[detail_key] = list(details)
+            self._pending_skill = {}
+        selector[field] = captured
+        self._write_json(self._path, trajectory)
 
     def record_step(
         self,
@@ -306,8 +349,46 @@ class TrajectoryRecorder:
         if event_type == "skill_execution_start":
             self._pending_skill = _skill_identity(payload)
             return
+        if event_type == "subgoal_step":
+            compact = _compact_event_fields(
+                payload,
+                (
+                    "goal",
+                    "substep_index",
+                    "action",
+                    "action_summary",
+                    "goal_reached",
+                    "error",
+                    "token_usage",
+                    "duration_s",
+                    "inference_time_s",
+                ),
+            )
+            if compact:
+                self._pending_skill.setdefault("subgoal_steps", []).append(compact)
+            return
         if event_type == "skill_step":
             if payload.get("error") is None and payload.get("valid_state_check") is not False:
+                compact = _compact_event_fields(
+                    payload,
+                    (
+                        "step_index",
+                        "target",
+                        "action",
+                        "action_summary",
+                        "grounding_mode",
+                        "valid_state_check",
+                        "recovery_attempted",
+                        "recovery_success",
+                        "token_usage",
+                        "duration_s",
+                        "inference_time_s",
+                        "validate_inference_time_s",
+                        "grounding_inference_time_s",
+                    ),
+                )
+                if compact:
+                    self._pending_skill.setdefault("steps", []).append(compact)
                 return
             self._pending_skill.update(_skill_identity(payload))
             failed_step = {
@@ -375,6 +456,13 @@ def _sum_step_token_usage(steps: list[dict[str, Any]]) -> dict[str, int]:
 
 def _skill_identity(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: payload[key] for key in ("skill_id", "skill_name") if payload.get(key) is not None}
+
+
+def _compact_event_fields(
+    payload: dict[str, Any],
+    keys: tuple[str, ...],
+) -> dict[str, Any]:
+    return {key: payload[key] for key in keys if payload.get(key) is not None}
 
 
 def load_trajectory_events(

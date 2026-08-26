@@ -18,7 +18,7 @@ Respond with EXACT JSON format for one of these actions:
 | `answer`        | Respond to user                          | `{"action_type":"answer", "text":"It's 25 degrees today."}`               |
 | `navigate_home` | Return to home screen                    | `{"action_type": "navigate_home"}`                                        |
 | `navigate_back` | Navigate back                            | `{"action_type": "navigate_back"}`                                        |
-| `scroll`        | Scroll direction (up/down/left/right)    | `{"action_type":"scroll", "direction":"down"}`                            |
+| `scroll`        | Scroll direction (up/down/left/right) from an optional start point | `{"action_type":"scroll", "direction":"down", "start_coordinate":[x, y]}` |
 | `status`        | Mark task as `complete` or `infeasible`  | `{"action_type":"status", "goal_status":"complete"}`                      |
 | `wait`          | Wait for screen to update                | `{"action_type":"wait"}`                                                  |
 | `ask_user`      | Ask user for information                 | `{"action_type":"ask_user", "text":"what is the exact requirements do you need?"}`        |
@@ -49,6 +49,7 @@ Note:
    - Gather information when needed (e.g., open Calendar to check schedule)
    - For scrolling:
      * Scroll direction is INVERSE to swipe (scroll down to see lower content)
+     * Set `start_coordinate` inside the target scrollable region; omit it to scroll from the screen center
      * If scroll fails, try opposite direction
 
 4. Text Operations:

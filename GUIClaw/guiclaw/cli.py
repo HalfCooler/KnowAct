@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -133,6 +134,8 @@ class CliConfig:
     memory_dir: Path | None = None
     skills_dir: Path | None = None
     enable_skill_execution: bool = False
+    enable_initial_skill_selector: bool = False
+    initial_skill_top_k: int = 5
     enable_skill_extraction: bool = False
     enable_memory_extraction: bool = False
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
@@ -215,7 +218,9 @@ class OpenAICompatibleLLMProvider:
         if extra_body:
             kwargs["extra_body"] = extra_body
 
+        inference_started_at = time.perf_counter()
         response = await self._client.chat.completions.create(**kwargs)
+        latency_s = time.perf_counter() - inference_started_at
         if not response.choices:
             raise RuntimeError("OpenAI-compatible API returned no choices")
 
@@ -247,6 +252,7 @@ class OpenAICompatibleLLMProvider:
             tool_calls=parsed_tool_calls or None,
             raw=response,
             usage=usage,
+            latency_s=latency_s,
         )
 
 
@@ -539,6 +545,11 @@ def load_config(path: Path | None = None) -> CliConfig:
         memory_dir=_optional_path(raw.get("memory_dir")),
         skills_dir=_optional_path(raw.get("skills_dir")),
         enable_skill_execution=_coerce_bool(raw.get("enable_skill_execution"), default=False),
+        enable_initial_skill_selector=_coerce_bool(
+            raw.get("enable_initial_skill_selector"),
+            default=False,
+        ),
+        initial_skill_top_k=_coerce_positive_int(raw.get("initial_skill_top_k"), default=5),
         enable_skill_extraction=_coerce_bool(raw.get("enable_skill_extraction"), default=False),
         enable_memory_extraction=_coerce_bool(raw.get("enable_memory_extraction"), default=False),
         evaluation=evaluation,
@@ -692,6 +703,20 @@ async def _execute_agent(
         artifacts_root=run_root,
         embedding_provider=embedding_provider,
     )
+    initial_skill_selector_enabled = (
+        skill_execution_enabled and config.enable_initial_skill_selector
+    )
+    postprocessing_enabled = (
+        skill_extraction_enabled
+        or config.enable_memory_extraction
+        or config.evaluation.enabled
+    )
+    auxiliary_provider = (
+        build_llm_provider(config.postprocess_provider)
+        if config.postprocess_provider is not None
+        and (initial_skill_selector_enabled or postprocessing_enabled)
+        else provider
+    )
 
     recorder = TrajectoryRecorder(output_dir=run_root, task=task, platform=backend.platform)
     if skill_executor is not None:
@@ -712,22 +737,24 @@ async def _execute_agent(
         intervention_handler=_build_intervention_handler(backend),
         policy_context=load_policy_context(config.memory_dir or DEFAULT_MEMORY_DIR),
         agent_profile=args.agent_profile or config.agent_profile,
-        enable_prompt_skill_selection=skill_execution_enabled,
+        enable_prompt_skill_selection=(
+            skill_execution_enabled and not initial_skill_selector_enabled
+        ),
+        initial_skill_selector_llm=(
+            auxiliary_provider if initial_skill_selector_enabled else None
+        ),
+        enable_initial_skill_selector=initial_skill_selector_enabled,
+        initial_skill_top_k=config.initial_skill_top_k,
         image_scale_ratio=config.image_scale_ratio,
         history_image_window=config.history_image_window,
         stagnation_limit=config.stagnation_limit,
         reasoning_effort=config.provider.reasoning_effort,
     )
     result = await agent.run(task)
-    if skill_extraction_enabled or config.enable_memory_extraction or config.evaluation.enabled:
-        postprocess_provider = (
-            build_llm_provider(config.postprocess_provider)
-            if config.postprocess_provider is not None
-            else provider
-        )
+    if postprocessing_enabled:
         postprocessor = PostRunProcessor(
-            llm=postprocess_provider,
-            merge_llm=postprocess_provider,
+            llm=auxiliary_provider,
+            merge_llm=auxiliary_provider,
             embedding_provider=embedding_provider,
             embedding_signature=config.embedding.model if config.embedding else None,
             skill_store_root=config.skills_dir or DEFAULT_SKILLS_DIR,
@@ -835,6 +862,10 @@ def main(argv: list[str] | None = None) -> int:
         from guiclaw.shortcuts import main as shortcuts_main
 
         return shortcuts_main(command_args[1:])
+    if command_args and command_args[0] == "skills":
+        from guiclaw.skills_cli import main as skills_main
+
+        return skills_main(command_args[1:])
     args = parse_args(command_args)
     try:
         result = asyncio.run(run_cli(args))

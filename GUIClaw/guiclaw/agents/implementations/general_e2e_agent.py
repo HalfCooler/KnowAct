@@ -184,13 +184,37 @@ def parse_response_to_action(
             else:
                 raise ValueError("Missing coordinates for drag action")
 
+        # Handle scroll action with an optional start point. When omitted, use
+        # the center of the active coordinate space (for example [500, 500]
+        # on the default 0-1000 grid), which maps to the screen center.
+        elif action_type == "scroll":
+            start_coord = action_data.get(
+                "start_coordinate",
+                [scale_factor_x / 2, scale_factor_y / 2],
+            )
+            if not isinstance(start_coord, list) or len(start_coord) != 2:
+                raise ValueError(f"Invalid scroll start coordinate: {start_coord}")
+
+            relative_x, relative_y = start_coord
+            absolute_x = int(relative_x * image_width / scale_factor_x)
+            absolute_y = int(relative_y * image_height / scale_factor_y)
+
+            logger.debug(
+                f"Scroll start coordinate conversion: relative ({relative_x}, {relative_y}) -> absolute ({absolute_x}, {absolute_y})"
+            )
+            return {
+                "action_type": "scroll",
+                "direction": action_data.get("direction", "down"),
+                "x": absolute_x,
+                "y": absolute_y,
+            }
+
         # Handle other action types
         elif action_type in [
             "open_app",
             "answer",
             "navigate_home",
             "navigate_back",
-            "scroll",
             "wait",
             "ask_user",
             "keyboard_enter",

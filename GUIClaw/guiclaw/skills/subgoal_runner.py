@@ -133,7 +133,9 @@ class SubgoalRunner:
                     model_output=response_content if isinstance(response_content, str) else None,
                     action=None, action_summary=None, screenshot_path=None,
                     goal_reached=False, error=error,
-                    duration_s=substep_dur, token_usage=None,
+                    duration_s=substep_dur,
+                    inference_time_s=parsed.get("inference_time_s"),
+                    token_usage=None,
                 )
                 if self._trajectory_recorder is not None:
                     self._trajectory_recorder.record_event(
@@ -161,7 +163,9 @@ class SubgoalRunner:
                     action=action, action_summary=summary, screenshot_path=None,
                     goal_reached=goal_reached,
                     error=None if goal_reached else "model declared goal unreachable",
-                    duration_s=substep_dur, token_usage=None,
+                    duration_s=substep_dur,
+                    inference_time_s=parsed.get("inference_time_s"),
+                    token_usage=None,
                 )
                 if goal_reached:
                     if self._trajectory_recorder is not None:
@@ -186,7 +190,9 @@ class SubgoalRunner:
                     action=action, action_summary="terminal action skipped in subgoal",
                     screenshot_path=None, goal_reached=False,
                     error="terminal action skipped in subgoal",
-                    duration_s=substep_dur, token_usage=None,
+                    duration_s=substep_dur,
+                    inference_time_s=parsed.get("inference_time_s"),
+                    token_usage=None,
                 )
                 continue
 
@@ -202,7 +208,9 @@ class SubgoalRunner:
                     action=action, action_summary=f"{action.action_type}",
                     screenshot_path=None, goal_reached=False,
                     error=f"execution error: {exc}",
-                    duration_s=substep_dur, token_usage=None,
+                    duration_s=substep_dur,
+                    inference_time_s=parsed.get("inference_time_s"),
+                    token_usage=None,
                 )
                 continue
 
@@ -243,7 +251,9 @@ class SubgoalRunner:
                 action=action, action_summary=action_desc,
                 screenshot_path=screenshot_path, goal_reached=False,
                 error=None, duration_s=substep_dur,
-                validate_duration_s=0.0, token_usage=substep_usage,
+                validate_duration_s=0.0,
+                inference_time_s=parsed.get("inference_time_s"),
+                token_usage=substep_usage,
             )
 
         if self._trajectory_recorder is not None:
@@ -272,8 +282,10 @@ class SubgoalRunner:
     ) -> dict[str, Any]:
         native_tools_enabled = profile_uses_native_tools(self._agent_profile)
         last_response_content: str | None = None
+        inference_time_s = 0.0
         for attempt in range(self._PROFILE_PARSE_RETRIES):
             try:
+                inference_started_at = time.perf_counter()
                 response = await self._llm.chat(
                     messages=messages,
                     tools=[COMPUTER_USE_TOOL] if native_tools_enabled else None,
@@ -281,7 +293,13 @@ class SubgoalRunner:
                     model=self._model or None,
                 )
             except Exception as exc:
-                return {"error": str(exc), "response_content": last_response_content}
+                inference_time_s += time.perf_counter() - inference_started_at
+                return {
+                    "error": str(exc),
+                    "response_content": last_response_content,
+                    "inference_time_s": inference_time_s,
+                }
+            inference_time_s += time.perf_counter() - inference_started_at
             for k, v in (response.usage or {}).items():
                 subgoal_usage[k] = subgoal_usage.get(k, 0) + v
             last_response_content = response.content
@@ -302,6 +320,7 @@ class SubgoalRunner:
                     "response": response,
                     "action": action,
                     "observation": current_observation,
+                    "inference_time_s": inference_time_s,
                 }
             except (ActionError, ValueError) as exc:
                 last_response_content = response.content
@@ -309,9 +328,14 @@ class SubgoalRunner:
                     return {
                         "error": f"profile/action parse error after retries: {exc}",
                         "response_content": response.content,
+                        "inference_time_s": inference_time_s,
                     }
                 messages.append(self._format_error_message(exc))
-        return {"error": "profile/action parse error after retries", "response_content": last_response_content}
+        return {
+            "error": "profile/action parse error after retries",
+            "response_content": last_response_content,
+            "inference_time_s": inference_time_s,
+        }
 
     def _format_error_message(self, exc: Exception) -> dict[str, Any]:
         return {
@@ -385,6 +409,7 @@ class SubgoalRunner:
         action_summary: str | None, screenshot_path: str | None,
         goal_reached: bool, error: str | None,
         duration_s: float = 0.0, validate_duration_s: float = 0.0,
+        inference_time_s: float | None = None,
         token_usage: dict[str, int] | None = None,
     ) -> None:
         if self._trajectory_recorder is None:
@@ -396,6 +421,9 @@ class SubgoalRunner:
             action_summary=action_summary, screenshot_path=screenshot_path,
             goal_reached=goal_reached, error=error,
             duration_s=round(duration_s, 3) if duration_s else None,
+            inference_time_s=round(inference_time_s, 3)
+            if inference_time_s is not None
+            else None,
             validate_duration_s=round(validate_duration_s, 3) if validate_duration_s else None,
             token_usage=token_usage or None,
         )

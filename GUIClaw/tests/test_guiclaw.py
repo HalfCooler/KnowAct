@@ -124,6 +124,22 @@ def _qwen_response(
     )
 
 
+def _gui_owl_response(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    action_text: str = "Execute the next action",
+) -> LLMResponse:
+    tool_call = {"name": name, "arguments": arguments}
+    return LLMResponse(
+        content=(
+            f'Action: "{action_text}"\n'
+            f"<tool_call>{json.dumps(tool_call, ensure_ascii=False)}</tool_call>"
+        ),
+        tool_calls=None,
+    )
+
+
 def _mobileworld_action_from_tool_args(args: dict) -> dict:
     action_type = str(args.get("action_type") or args.get("action") or "").strip().lower()
     if action_type in {"tap", "click", "long_press", "double_tap", "double_click"}:
@@ -203,9 +219,36 @@ class _RecordingLLM(_ScriptedLLM):
         self.calls: list[list[dict]] = []
 
     async def chat(
+        self,
+        messages,
+        tools=None,
+        tool_choice=None,
+        model=None,
+        max_tokens=None,
+        reasoning_effort=None,
+    ) -> LLMResponse:
+        del reasoning_effort
+        self.calls.append(copy.deepcopy(messages))
+        return await super().chat(messages, tools=tools, tool_choice=tool_choice)
+
+
+class _RecordingSelectorLLM(_ScriptedLLM):
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        super().__init__(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    async def chat(
         self, messages, tools=None, tool_choice=None, model=None, max_tokens=None
     ) -> LLMResponse:
-        self.calls.append(copy.deepcopy(messages))
+        self.calls.append(
+            {
+                "messages": copy.deepcopy(messages),
+                "tools": copy.deepcopy(tools),
+                "tool_choice": tool_choice,
+                "model": model,
+                "max_tokens": max_tokens,
+            }
+        )
         return await super().chat(messages, tools=tools, tool_choice=tool_choice)
 
 
@@ -265,6 +308,51 @@ class _FakePromptSkillExecutor:
             execution_summary=f"Skill {skill.name} executed",
             token_usage={"prompt_tokens": 2},
         )
+
+
+class _FailingInitialSkillExecutor(_FakePromptSkillExecutor):
+    async def execute(self, skill: Skill, params: dict[str, str], *, timeout: float = 30.0):
+        del timeout
+        self.calls.append((skill, params))
+        return skill_executor_module.SkillExecutionResult(
+            skill=skill,
+            step_results=[],
+            state=skill_executor_module.ExecutionState.FAILED,
+            execution_summary=f"Skill {skill.name} failed",
+            error="stale compact coordinates",
+        )
+
+
+def _initial_selector_test_skill() -> Skill:
+    return Skill(
+        skill_id="shortcut:dl:dry:search",
+        name="dry_search",
+        description="Search videos by query",
+        app="dry.app",
+        platform="dry-run",
+        tags=("shortcut", "deeplink", "validated"),
+        parameters=("query",),
+        steps=(
+            SkillStep(
+                action_type="open_deeplink",
+                target="dry://search?q={{query}}",
+                parameters={"text": "dry://search?q={{query}}", "package": "dry.app"},
+            ),
+        ),
+    )
+
+
+def _done_response(*, status: str = "success") -> LLMResponse:
+    return LLMResponse(
+        content="Done",
+        tool_calls=[
+            ToolCall(
+                id="call-done",
+                name="computer_use",
+                arguments={"action_type": "done", "status": status},
+            )
+        ],
+    )
 
 
 @pytest.mark.asyncio
@@ -336,6 +424,400 @@ async def test_prompt_skill_selection_injects_and_dispatches_use_skill(tmp_path:
     assert "`use_skill`" in first_prompt
     assert "skill_id=shortcut:dl:dry:search" in first_prompt
     assert "`click_then_type`" in first_prompt
+
+
+@pytest.mark.asyncio
+async def test_initial_skill_selector_executes_deeplink_then_hands_off_to_small_model(
+    tmp_path: Path,
+) -> None:
+    skill = _initial_selector_test_skill()
+    library = FlatSkillLibrary(store_dir=tmp_path / "skills")
+    library.add(skill)
+    executor = _FakePromptSkillExecutor()
+    selector = _RecordingSelectorLLM(
+        [
+            LLMResponse(
+                content="Use the validated direct search shortcut.",
+                tool_calls=[
+                    ToolCall(
+                        id="select-1",
+                        name="skill_0",
+                        arguments={
+                            "query": "cats",
+                            "handoff_summary": "已使用视频搜索 API 搜索 cats。",
+                        },
+                    )
+                ],
+                usage={"prompt_tokens": 7},
+                ttft_s=0.12,
+                latency_s=0.34,
+            )
+        ]
+    )
+    small_llm = _RecordingLLM([_done_response()])
+    recorder = _make_recorder(tmp_path, "initial selector")
+    agent = GuiAgent(
+        small_llm,
+        _SkillTestBackend(),
+        trajectory_recorder=recorder,
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        skill_library=library,
+        skill_executor=executor,
+        initial_skill_selector_llm=selector,
+        enable_initial_skill_selector=True,
+        initial_skill_top_k=5,
+        agent_profile="general_compact",
+        history_image_window=1,
+    )
+
+    result = await agent.run("Search videos by query cats", max_retries=1)
+
+    assert result.success
+    assert [(selected.skill_id, params) for selected, params in executor.calls] == [
+        (skill.skill_id, {"query": "cats"})
+    ]
+    assert result.token_usage["prompt_tokens"] == 9
+    assert selector.calls[0]["tool_choice"] == "required"
+    assert selector.calls[0]["max_tokens"] == 128
+    selector_tools = selector.calls[0]["tools"]
+    assert selector_tools[0]["function"]["name"] == "skill_0"
+    assert selector_tools[0]["function"]["description"].startswith(
+        "[validated deeplink]"
+    )
+    assert selector_tools[0]["function"]["parameters"]["required"] == [
+        "query",
+        "handoff_summary",
+    ]
+    selector_properties = selector_tools[0]["function"]["parameters"]["properties"]
+    assert selector_properties["query"]["description"] == (
+        "A concise search seed containing only the primary searchable target. "
+        "Preserve exact quoted titles and names. Otherwise use the core person, "
+        "topic, genre, or category, with at most one coarse content-type term. "
+        "Exclude the app name, result attributes that must be verified later, "
+        "and follow-up GUI actions."
+    )
+    assert selector_properties["handoff_summary"]["description"] == (
+        "One short factual sentence describing only the selected skill's direct effect, "
+        "assuming successful execution. Do not mention remaining requirements, follow-up "
+        "actions, verification, task completion, or any action outside the skill."
+    )
+    assert selector_tools[-1]["function"]["name"] == "no_skill"
+    assert selector_tools[-1]["function"]["description"] == (
+        "Choose this when no candidate provides a correct and useful initial operation "
+        "or when required arguments cannot be derived reliably."
+    )
+    small_model_prompt = _messages_text(small_llm.calls[0])
+    assert skill.skill_id not in small_model_prompt
+    assert "Memory state:" in small_model_prompt
+    assert "已确认/锁定：\n- 已使用视频搜索 API 搜索 cats。" in small_model_prompt
+    assert "Previous intents:" not in small_model_prompt
+    assert "Step 1:" not in small_model_prompt
+    assert recorder.path is not None
+    trajectory = json.loads(recorder.path.read_text(encoding="utf-8"))
+    persisted = trajectory["initial_skill_selectors"][0]
+    assert persisted["subtask"] == 1
+    assert persisted["attempt"] == 1
+    assert persisted["candidates"]["query"] == "Search videos by query cats"
+    assert persisted["candidates"]["top_k"] == 5
+    assert persisted["candidates"]["candidate_count"] == 1
+    assert persisted["candidates"]["candidates"][0]["skill_id"] == skill.skill_id
+    assert persisted["candidates"]["candidates"][0]["rank"] == 1
+    assert isinstance(persisted["candidates"]["candidates"][0]["score"], float)
+    assert persisted["model_response"]["request"] == {
+        "prompt": (
+            "Select exactly one candidate tool that performs a correct and useful initial "
+            "operation for the task. A skill does not need to finish the whole task. Prefer "
+            "a validated deeplink when it safely reaches a relevant state. Use no_skill "
+            "when no candidate is useful or its required arguments cannot be derived "
+            "reliably.\n\n"
+            "Argument rules:\n"
+            "1. Preserve exact quoted titles, names, people, identifiers, and user-provided "
+            "text.\n"
+            "2. For a search skill whose argument is query or keyword, treat it as a concise "
+            "retrieval seed rather than a restatement of the full task. Use the primary "
+            "searchable target and at most one coarse content-type term when needed. Exclude "
+            "the app/platform name, follow-up actions, and attributes that must be verified "
+            "from results (for example: 独播, 官方, 免费, 高分, 最新, 排名, 年份, or result "
+            "tags), unless they are part of an exact title or required to disambiguate "
+            "identical names. Do not invent a title or candidate.\n"
+            "3. For other arguments, use the narrowest value that faithfully preserves the "
+            "request. If an argument remains ambiguous, use no_skill.\n\n"
+            "Set handoff_summary to one short factual sentence describing only the selected "
+            "skill's direct effect, assuming successful execution. Do not mention remaining "
+            "requirements, follow-up actions, verification, task completion, or any action "
+            "outside the skill.\n\n"
+            "Task: Search videos by query cats"
+        ),
+        "tool_choice": "required",
+        "max_tokens": 128,
+    }
+    assert persisted["model_response"]["model_output"] == {
+        "raw_content": "Use the validated direct search shortcut.",
+        "tool_calls": [
+            {
+                "id": "select-1",
+                "name": "skill_0",
+                "arguments": {
+                    "query": "cats",
+                    "handoff_summary": "已使用视频搜索 API 搜索 cats。",
+                },
+            }
+        ],
+    }
+    assert persisted["model_response"]["token_usage"] == {"prompt_tokens": 7}
+    assert persisted["model_response"]["ttft_s"] == 0.12
+    assert persisted["model_response"]["latency_s"] == 0.34
+    assert persisted["selection"] == {
+        "selected": True,
+        "tool_name": "skill_0",
+        "skill_id": skill.skill_id,
+        "skill_name": skill.name,
+        "arguments": {"query": "cats"},
+        "summary": "已使用视频搜索 API 搜索 cats。",
+    }
+    assert persisted["execution_result"]["state"] == "succeeded"
+    assert persisted["execution_result"]["handoff_summary"] == (
+        "已使用视频搜索 API 搜索 cats。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_initial_skill_selector_can_choose_none(tmp_path: Path) -> None:
+    library = FlatSkillLibrary(store_dir=tmp_path / "skills")
+    library.add(_initial_selector_test_skill())
+    executor = _FakePromptSkillExecutor()
+    selector = _RecordingSelectorLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="select-none", name="no_skill", arguments={})],
+            )
+        ]
+    )
+    agent = GuiAgent(
+        _RecordingLLM([_done_response()]),
+        _SkillTestBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "initial selector none"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        skill_library=library,
+        skill_executor=executor,
+        initial_skill_selector_llm=selector,
+        enable_initial_skill_selector=True,
+    )
+
+    result = await agent.run("Search videos by query cats", max_retries=1)
+
+    assert result.success
+    assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_initial_skill_selector_rejects_wrong_argument_names(tmp_path: Path) -> None:
+    library = FlatSkillLibrary(store_dir=tmp_path / "skills")
+    library.add(_initial_selector_test_skill())
+    executor = _FakePromptSkillExecutor()
+    selector = _RecordingSelectorLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="select-invalid",
+                        name="skill_0",
+                        arguments={"param": "cats"},
+                    )
+                ],
+            )
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    agent = GuiAgent(
+        _RecordingLLM([_done_response()]),
+        _SkillTestBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "initial selector invalid", events=events),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        skill_library=library,
+        skill_executor=executor,
+        initial_skill_selector_llm=selector,
+        enable_initial_skill_selector=True,
+    )
+
+    result = await agent.run("Search videos by query cats", max_retries=1)
+
+    assert result.success
+    assert executor.calls == []
+    rejected = [
+        event
+        for event in events
+        if event.get("type") == "initial_skill_selection"
+        and event.get("reason") == "invalid_arguments"
+    ]
+    assert rejected
+    assert rejected[0]["missing_params"] == ["query"]
+    assert rejected[0]["unknown_params"] == ["param"]
+
+
+@pytest.mark.asyncio
+async def test_initial_skill_failure_still_hands_current_screen_to_small_model(
+    tmp_path: Path,
+) -> None:
+    skill = _initial_selector_test_skill()
+    library = FlatSkillLibrary(store_dir=tmp_path / "skills")
+    library.add(skill)
+    executor = _FailingInitialSkillExecutor()
+    selector = _RecordingSelectorLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="select-failing",
+                        name="skill_0",
+                        arguments={
+                            "query": "cats",
+                            "handoff_summary": "已尝试使用视频搜索 API 搜索 cats。",
+                        },
+                    )
+                ],
+            )
+        ]
+    )
+    backend = _SkillTestBackend()
+    events: list[dict[str, Any]] = []
+    small_llm = _RecordingLLM([_done_response()])
+    agent = GuiAgent(
+        small_llm,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "initial selector failure", events=events),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        skill_library=library,
+        skill_executor=executor,
+        initial_skill_selector_llm=selector,
+        enable_initial_skill_selector=True,
+        agent_profile="general_compact",
+        history_image_window=1,
+    )
+
+    result = await agent.run("Search videos by query cats", max_retries=1)
+
+    assert result.success
+    assert len(executor.calls) == 1
+    assert len(backend.observe_calls) == 2
+    assert backend.observe_calls[-1].name == "000_initial_skill.png"
+    assert any(
+        event.get("type") == "initial_skill_execution_result"
+        and event.get("state") == "failed"
+        for event in events
+    )
+    failure_prompt = _messages_text(small_llm.calls[0])
+    assert "已尝试使用视频搜索 API 搜索 cats" in failure_prompt
+    assert "技能执行未成功" in failure_prompt
+
+
+@pytest.mark.asyncio
+async def test_initial_skill_selector_and_execution_run_only_on_first_attempt(
+    tmp_path: Path,
+) -> None:
+    library = FlatSkillLibrary(store_dir=tmp_path / "skills")
+    library.add(_initial_selector_test_skill())
+    executor = _FakePromptSkillExecutor()
+    selector = _RecordingSelectorLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="select-once",
+                        name="skill_0",
+                        arguments={"query": "cats"},
+                    )
+                ],
+            )
+        ]
+    )
+    agent = GuiAgent(
+        _RecordingLLM([_done_response(status="failure"), _done_response()]),
+        _SkillTestBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "initial selector retry"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        skill_library=library,
+        skill_executor=executor,
+        initial_skill_selector_llm=selector,
+        enable_initial_skill_selector=True,
+    )
+
+    result = await agent.run("Search videos by query cats", max_retries=2)
+
+    assert result.success
+    assert len(selector.calls) == 1
+    assert len(executor.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_gui_owl_prompt_skill_selection_dispatches_use_skill(tmp_path: Path) -> None:
+    skill_id = "shortcut:dl:dry:search"
+    library = FlatSkillLibrary(store_dir=tmp_path / "skills")
+    skill = Skill(
+        skill_id=skill_id,
+        name="dry_search",
+        description="Search videos by query",
+        app="dry.app",
+        platform="dry-run",
+        tags=("shortcut", "deeplink", "validated"),
+        parameters=("query",),
+        steps=(
+            SkillStep(
+                action_type="open_deeplink",
+                target="dry://search?q={{query}}",
+                parameters={"text": "dry://search?q={{query}}", "package": "dry.app"},
+            ),
+        ),
+    )
+    library.add(skill)
+    executor = _FakePromptSkillExecutor()
+    llm = _RecordingLLM(
+        [
+            _gui_owl_response(
+                "use_skill",
+                {"skill_id": skill_id, "arguments": {"query": "cats"}},
+                action_text="Search with the retrieved shortcut",
+            ),
+            _gui_owl_response(
+                "mobile_use",
+                {"action": "terminate", "status": "success"},
+                action_text="Finish the completed task",
+            ),
+        ]
+    )
+    agent = GuiAgent(
+        llm,
+        _SkillTestBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "GUI-Owl prompt skill"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+        skill_library=library,
+        skill_executor=executor,
+        enable_prompt_skill_selection=True,
+        prompt_skill_top_k=3,
+        prompt_shortcut_only=True,
+        agent_profile="gui_owl",
+    )
+
+    result = await agent.run("Search videos by query cats", max_retries=1)
+
+    assert result.success
+    assert len(executor.calls) == 1
+    executed_skill, executed_params = executor.calls[0]
+    assert executed_skill.skill_id == skill_id
+    assert executed_params == {"query": "cats"}
+    first_prompt = _messages_text(llm.calls[0])
+    assert '"name": "use_skill"' in first_prompt
+    assert skill_id in first_prompt
 
 
 @pytest.mark.asyncio
@@ -1240,6 +1722,9 @@ def test_android_normalization_supports_common_chinese_and_english_aliases() -> 
         "B站": "tv.danmaku.bili",
         "小红书客户端": "com.xingin.xhs",
         "QQ音乐": "com.tencent.qqmusic",
+        "红果": "com.phoenix.read",
+        "红果免费短剧": "com.phoenix.read",
+        "打开红果免费短剧": "com.phoenix.read",
         "百度地图": "com.baidu.BaiduMap",
         "Google Maps app": "com.google.android.apps.maps",
         "Chrome browser": "com.android.chrome",
@@ -1266,6 +1751,9 @@ def test_android_normalization_supports_common_chinese_and_english_aliases() -> 
     adb_cases = {
         "Mastodon": "org.joinmastodon.android",
         "Mastodon App": "org.joinmastodon.android",
+        "红果": "com.phoenix.read",
+        "红果免费短剧": "com.phoenix.read",
+        "打开红果免费短剧": "com.phoenix.read",
         "org.joinmastodon.android": "org.joinmastodon.android",
         "org.joinmastodon.android.mastodon": "org.joinmastodon.android",
         "com.taobao.taobao": "com.taobao.taobao",
@@ -2115,7 +2603,10 @@ async def test_agent_subgoal_runner_uses_profile_seam_for_qwen3vl(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_agent_subgoal_runner_records_events(tmp_path: Path) -> None:
+async def test_agent_subgoal_runner_records_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     screenshot = tmp_path / "subgoal-record.png"
     _write_test_png(screenshot, size=(1000, 1000))
     llm = _RecordingLLM(
@@ -2132,6 +2623,11 @@ async def test_agent_subgoal_runner_records_events(tmp_path: Path) -> None:
     events: list[dict[str, Any]] = []
     recorder = _make_recorder(tmp_path, "subgoal trace", events=events)
     recorder.start()
+    inference_clock = iter((1.0, 1.2, 2.0, 2.3))
+    monkeypatch.setattr(
+        "guiclaw.skills.subgoal_runner.time.perf_counter",
+        lambda: next(inference_clock),
+    )
     runner = _AgentSubgoalRunner(
         llm=llm,
         backend=backend,
@@ -2157,6 +2653,8 @@ async def test_agent_subgoal_runner_records_events(tmp_path: Path) -> None:
     assert subgoal_steps[0]["action"]["action_type"] == "tap"
     assert subgoal_steps[1]["goal_reached"] is True
     assert subgoal_steps[1]["action"]["action_type"] == "done"
+    assert subgoal_steps[0]["inference_time_s"] == pytest.approx(0.2)
+    assert subgoal_steps[1]["inference_time_s"] == pytest.approx(0.3)
     assert validator.calls == []
 
 
@@ -4486,6 +4984,101 @@ async def test_agent_waits_for_ui_to_settle_before_observing(
         "sleep:0.5",
         "observe:001_tap.png",
     ]
+
+
+@pytest.mark.asyncio
+async def test_agent_waits_like_open_app_when_tap_changes_foreground_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    original_sleep = asyncio.sleep
+
+    class _TapLaunchBackend(DryRunBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.observe_count = 0
+
+        async def execute(self, action, timeout: float = 5.0) -> str:
+            events.append(f"execute:{action.action_type}")
+            return await super().execute(action, timeout=timeout)
+
+        async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+            self.observe_count += 1
+            observation = await super().observe(screenshot_path, timeout=timeout)
+            observation.foreground_app = (
+                "com.android.launcher" if self.observe_count == 1 else "com.qiyi.video"
+            )
+            events.append(
+                f"observe:{Path(screenshot_path).name}:{observation.foreground_app}"
+            )
+            return observation
+
+    async def fake_sleep(delay: float) -> None:
+        events.append(f"sleep:{delay}")
+        await original_sleep(0)
+
+    monkeypatch.setattr("guiclaw.agent.asyncio.sleep", fake_sleep)
+    agent = GuiAgent(
+        _ScriptedLLM(
+            [
+                LLMResponse(
+                    content="tap app icon",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-1",
+                            name="computer_use",
+                            arguments={"action_type": "tap", "x": 10, "y": 20},
+                        )
+                    ],
+                ),
+                LLMResponse(
+                    content="finish task",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-2",
+                            name="computer_use",
+                            arguments={"action_type": "done", "status": "success"},
+                        )
+                    ],
+                ),
+            ]
+        ),
+        _TapLaunchBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "tap launches app"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+    )
+
+    result = await agent.run("Open iQIYI by tapping its icon")
+
+    assert result.success
+    first_app_observe = events.index("observe:001_tap.png:com.qiyi.video")
+    app_change_sleep = events.index("sleep:5.0")
+    refreshed_app_observe = events.index(
+        "observe:001_tap.png:com.qiyi.video",
+        first_app_observe + 1,
+    )
+    assert first_app_observe < app_change_sleep < refreshed_app_observe
+    assert events.count("sleep:5.0") == 1
+
+
+def test_agent_foreground_app_change_ignores_activity_changes(tmp_path: Path) -> None:
+    class _AndroidBackend(DryRunBackend):
+        platform = "android"
+
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        _AndroidBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "foreground package identity"),
+        artifacts_root=tmp_path / "runs",
+    )
+    previous = Observation(None, 1080, 1920, "com.qiyi.video/.HomeActivity", "android")
+    same_package = Observation(None, 1080, 1920, "com.qiyi.video/.SearchActivity", "android")
+    different_package = Observation(None, 1080, 1920, "com.jingdong.app.mall/.Main", "android")
+
+    assert agent._foreground_app_changed(previous, same_package) is False
+    assert agent._foreground_app_changed(previous, different_package) is True
 
 
 def test_agent_open_app_settle_seconds_is_five(tmp_path: Path) -> None:

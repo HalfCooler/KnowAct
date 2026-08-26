@@ -9,6 +9,7 @@ with the [CLI and configuration reference](guiclaw-cli.md).
 | Model or endpoint | `agent_profile` | Coordinate contract | Recommended ADB capture |
 | --- | --- | --- | --- |
 | OpenAI-style model with native tool calling | `default` | Tool-schema coordinates | `auto` |
+| General vision-language model | `general_compact` | 0–1000 grid | `auto` |
 | Self-hosted GUI-Owl 1.5 | `gui_owl` | 0–1000 grid | `auto` |
 | Alibaba Model Studio `gui-plus` | `gui_owl` | Smart-resized image pixels | `auto` |
 | Versioned `gui-plus-*` models | `gui_owl` | 0–1000 grid | `auto` |

@@ -43,6 +43,7 @@ from guiclaw.agents.utils.prompts import (
     GELAB_INSTRUCTION_SUFFIX,
     GELAB_SYSTEM_PROMPT,
     GELAB_USER_PROMPT_TEMPLATE,
+    GENERAL_COMPACT_PROMPT_TEMPLATE,
     GENERAL_E2E_PROMPT_TEMPLATE,
     GUI_OWL_1_5_SYSTEM_PROMPT_TEMPLATE,
     GUI_OWL_1_5_USER_PROMPT_WITH_HISTSTEPS_TEMPLATE,
@@ -63,6 +64,7 @@ from guiclaw.tool_schemas import COMPUTER_USE_TOOL, build_computer_use_tool
 SUPPORTED_AGENT_PROFILES: tuple[str, ...] = (
     "default",
     "general_e2e",
+    "general_compact",
     "gui_owl",
     "venus",
     "seed",
@@ -112,6 +114,7 @@ def coordinate_mode_for_profile(profile_name: str | None, model_name: str = "") 
 # use_thinking=True, max_tokens=4096). temperature (0.7) already matches the
 # nanobot provider default, so it is not repeated here.
 _PROFILE_LLM_DEFAULTS: dict[str, dict[str, Any]] = {
+    "general_compact": {"reasoning_effort": "none", "max_tokens": 256},
     "gui_owl": {"max_tokens": 2048},
     "seed": {"reasoning_effort": "high", "max_tokens": 4096},
 }
@@ -145,7 +148,7 @@ def profile_tool_definition(profile_name: str | None) -> dict[str, Any] | None:
 
 
 def _is_general_e2e_profile(profile_name: str | None) -> bool:
-    return canonicalize_agent_profile(profile_name) == "general_e2e"
+    return canonicalize_agent_profile(profile_name) in {"general_e2e", "general_compact"}
 
 
 def _is_legacy_gui_plus(model_name: str) -> bool:
@@ -208,14 +211,21 @@ def build_profile_messages(
             available_apps=available_apps,
         )
     if _is_general_e2e_profile(profile):
+        prompt_template = (
+            GENERAL_COMPACT_PROMPT_TEMPLATE
+            if profile == "general_compact"
+            else GENERAL_E2E_PROMPT_TEMPLATE
+        )
         return _build_general_e2e_messages(
             task=task,
             current_observation=current_observation,
             history=history,
             model_name=model_name,
             history_image_window=effective_history_image_window,
-            prompt_template=GENERAL_E2E_PROMPT_TEMPLATE,
+            prompt_template=prompt_template,
             compact_prompt_parts=compact_prompt_parts,
+            image_scale_ratio=(image_scale_ratio if profile == "general_compact" else 1.0),
+            rolling_memory_history=(profile == "general_compact"),
         )
     if profile == "qwen3vl":
         return _build_qwen3vl_messages(
@@ -248,6 +258,7 @@ def build_profile_messages(
             model_name=model_name,
             history_image_window=effective_history_image_window,
             image_scale_ratio=image_scale_ratio,
+            compact_prompt_parts=compact_prompt_parts,
         )
     if profile == "venus":
         return _build_ui_venus_messages(
@@ -335,13 +346,39 @@ def parse_profile_action(
     profile = canonicalize_agent_profile(profile_name)
     if _is_general_e2e_profile(profile):
         action_str = _general_e2e_action_text(content)
+        summary = content
+        intent = content
+        if profile == "general_compact":
+            parsed_action = general_e2e_agent.parse_json_markdown(action_str)
+            if isinstance(parsed_action, list) and len(parsed_action) == 1:
+                parsed_action = parsed_action[0]
+            if isinstance(parsed_action, dict):
+                parsed_intent = parsed_action.get("intent")
+                parsed_memory = parsed_action.get("memory")
+                structured_memory = _general_compact_structured_memory(parsed_action)
+                parsed_result = parsed_action.get("result")
+                if isinstance(parsed_intent, str) and parsed_intent.strip():
+                    intent = parsed_intent.strip()
+                if isinstance(parsed_memory, str) and parsed_memory.strip():
+                    summary = parsed_memory.strip()
+                elif structured_memory is not None:
+                    summary = _general_compact_memory_update_summary(structured_memory)
+                elif isinstance(parsed_result, str) and parsed_result.strip():
+                    summary = parsed_result.strip()
+                else:
+                    summary = intent
+                if not isinstance(parsed_intent, str) or not parsed_intent.strip():
+                    intent = summary
         action = general_e2e_agent.parse_response_to_action(
             action_str,
             screen_width,
             screen_height,
             scale_factor=_general_e2e_scale_factor(model_name, screen_width, screen_height),
         )
-        return _to_guiclaw_payload(action, summary=content)
+        payload = _to_guiclaw_payload(action, summary=summary)
+        if profile == "general_compact":
+            payload["intent"] = intent
+        return payload
     if profile == "qwen3vl":
         structured = qwen3vl.parse_action_to_structure_output(content)
         action = qwen3vl.parsing_response_to_andoid_world_env_action(
@@ -383,11 +420,22 @@ def parse_profile_action(
             coordinate_width=coordinate_width,
             coordinate_height=coordinate_height,
         )
-        action = gui_owl_1_5.parsing_response_to_andoid_world_env_action(
-            structured,
-            image_height=screen_height,
-            image_width=screen_width,
-        )
+        if structured.get("action_name") == USE_SKILL_ACTION_TYPE:
+            skill_call = structured.get("action_json") or {}
+            skill_arguments = skill_call.get("arguments") or {}
+            if not isinstance(skill_arguments, dict):
+                raise ValueError("use_skill arguments must be an object")
+            action = {
+                "action_type": USE_SKILL_ACTION_TYPE,
+                "skill_id": str(skill_call.get("skill_id") or "").strip(),
+                "arguments": skill_arguments,
+            }
+        else:
+            action = gui_owl_1_5.parsing_response_to_andoid_world_env_action(
+                structured,
+                image_height=screen_height,
+                image_width=screen_width,
+            )
         payload = _to_guiclaw_payload(action, summary=structured.get("conclusion") or content)
         raw_coordinates = structured.get("raw_coordinates")
         if raw_coordinates:
@@ -508,37 +556,58 @@ def _build_general_e2e_messages(
     history_image_window: int,
     prompt_template: Any,
     compact_prompt_parts: Any | None = None,
+    image_scale_ratio: float = 1.0,
+    rolling_memory_history: bool = False,
 ) -> list[dict[str, Any]]:
     observations = [turn.observation for turn in history] + [current_observation]
     tool_results = [turn.tool_result_message.get("content") for turn in history]
-    responses = [_history_raw_response(turn) for turn in history]
     scale_factor = _general_e2e_scale_factor(
         model_name,
         int(current_observation.screen_width or 999),
         int(current_observation.screen_height or 999),
     )
-    messages = [
-        {
-            "role": "system",
-            "content": prompt_template.render(
-                tools="",
-                scale_factor=scale_factor,
-                extra_action_rows=getattr(compact_prompt_parts, "action_rows", "") or "",
-                decision_rules=getattr(compact_prompt_parts, "decision_rules", "") or "",
-                compact_skill_instructions=getattr(
-                    compact_prompt_parts,
-                    "compact_skill_instructions",
-                    "",
-                )
-                or "",
+    system_message = {
+        "role": "system",
+        "content": prompt_template.render(
+            tools="",
+            scale_factor=scale_factor,
+            extra_action_rows=getattr(compact_prompt_parts, "action_rows", "") or "",
+            decision_rules=getattr(compact_prompt_parts, "decision_rules", "") or "",
+            compact_skill_instructions=getattr(
+                compact_prompt_parts,
+                "compact_skill_instructions",
+                "",
+            )
+            or "",
+        ),
+    }
+    if rolling_memory_history:
+        latest_memory = _general_compact_history_memory(history)
+        instruction_parts = [f"Instruction: {task}"]
+        if latest_memory:
+            instruction_parts.extend(["", f"Memory state:\n{latest_memory}"])
+        return [
+            system_message,
+            _general_user_message(
+                current_observation,
+                tool_result=None,
+                ask_user_response=None,
+                instruction="\n".join(instruction_parts),
+                model_name=model_name,
+                image_scale_ratio=image_scale_ratio,
             ),
-        },
+        ]
+
+    responses = [_history_raw_response(turn) for turn in history]
+    messages = [
+        system_message,
         _general_user_message(
             observations[0],
             tool_result=None,
             ask_user_response=None,
             instruction=task,
             model_name=model_name,
+            image_scale_ratio=image_scale_ratio,
         ),
     ]
     for index, response in enumerate(responses):
@@ -550,6 +619,7 @@ def _build_general_e2e_messages(
                 ask_user_response=None,
                 instruction=None,
                 model_name=model_name,
+                image_scale_ratio=image_scale_ratio,
             )
         )
     return _hide_history_images_like_general(messages, history_image_window)
@@ -663,6 +733,45 @@ def _build_seed_messages(
     return _drop_old_tool_images(messages, history_image_window)
 
 
+def _gui_owl_skill_tool_definition(compact_prompt_parts: Any | None) -> str:
+    skill_ids = tuple(getattr(compact_prompt_parts, "skill_ids", ()) or ())
+    catalog = str(getattr(compact_prompt_parts, "catalog", "") or "").strip()
+    if not skill_ids or not catalog:
+        return ""
+    tool = {
+        "type": "function",
+        "function": {
+            "name_for_human": USE_SKILL_ACTION_TYPE,
+            "name": USE_SKILL_ACTION_TYPE,
+            "description": (
+                "Run one listed reusable GUI skill. If a listed skill matches the task's "
+                "named app and next useful part, call use_skill before manual navigation. "
+                "A skill may open or navigate the target app internally. Pass only "
+                "task-provided arguments.\nAvailable skills:\n"
+                f"{catalog}"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_id": {
+                        "type": "string",
+                        "enum": list(skill_ids),
+                        "description": "Exact skill_id copied from the available skills.",
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "Arguments required by the selected skill.",
+                        "additionalProperties": True,
+                    },
+                },
+                "required": ["skill_id"],
+            },
+            "args_format": "Format the arguments as a JSON object.",
+        },
+    }
+    return json.dumps(tool, ensure_ascii=False)
+
+
 def _build_gui_owl_messages(
     *,
     task: str,
@@ -671,6 +780,7 @@ def _build_gui_owl_messages(
     model_name: str,
     history_image_window: int,
     image_scale_ratio: float,
+    compact_prompt_parts: Any | None = None,
 ) -> list[dict[str, Any]]:
     observations = [turn.observation for turn in history] + [current_observation]
     total_history_count = len(history)
@@ -700,7 +810,9 @@ def _build_gui_owl_messages(
             image_scale_ratio=image_scale_ratio,
         ),
     ]
-    system_prompt = GUI_OWL_1_5_SYSTEM_PROMPT_TEMPLATE.render(tools="")
+    system_prompt = GUI_OWL_1_5_SYSTEM_PROMPT_TEMPLATE.render(
+        tools=_gui_owl_skill_tool_definition(compact_prompt_parts)
+    )
     if _is_legacy_gui_plus(model_name):
         resized_height, resized_width = _gui_owl_scaled_smart_resize(
             current_observation.screen_height,
@@ -773,6 +885,138 @@ def _history_raw_response(turn: Any) -> str:
     return str(content or turn.action_summary or "")
 
 
+def _general_compact_memory_items(value: Any) -> list[str]:
+    values = value if isinstance(value, list) else [value]
+    return [str(item).strip() for item in values if isinstance(item, str) and item.strip()]
+
+
+def _general_compact_structured_memory(parsed: Any) -> dict[str, Any] | None:
+    """Accept the canonical nested memory and normalize older flat model output."""
+    if not isinstance(parsed, dict):
+        return None
+    nested = parsed.get("memory")
+    if isinstance(nested, dict):
+        return nested
+    flat = {key: parsed[key] for key in ("add", "drop", "current", "remaining") if key in parsed}
+    return flat or None
+
+
+def _general_compact_memory_update_summary(memory: dict[str, Any]) -> str:
+    parts: list[str] = []
+    additions = _general_compact_memory_items(memory.get("add"))
+    removals = _general_compact_memory_items(memory.get("drop"))
+    current = memory.get("current")
+    remaining = memory.get("remaining")
+    if additions:
+        parts.append(f"新增锁定：{'；'.join(additions)}")
+    if removals and additions:
+        parts.append(f"修正锁定：{'；'.join(removals)}")
+    if isinstance(current, str) and current.strip():
+        parts.append(f"当前：{current.strip()}")
+    if isinstance(remaining, str) and remaining.strip():
+        parts.append(f"剩余/约束：{remaining.strip()}")
+    return "；".join(parts) or "Memory 未提供有效更新"
+
+
+def _general_compact_legacy_fields(memory: str) -> tuple[list[str], str, str]:
+    """Split the previous full-memory format while keeping plain summaries useful."""
+    text = memory.strip()
+    completed_prefix = "已完成/事实："
+    current_marker = "；当前："
+    remaining_marker = "；剩余/约束："
+    if text.startswith(completed_prefix) and current_marker in text:
+        completed, _, tail = text[len(completed_prefix) :].partition(current_marker)
+        current, separator, remaining = tail.partition(remaining_marker)
+        locked = [] if completed.strip() in {"", "无", "暂无"} else [completed.strip()]
+        return locked, current.strip(), remaining.strip() if separator else ""
+    return ([text] if text else []), "", ""
+
+
+def _general_compact_history_memory(history: list[Any]) -> str:
+    """Fold compact deltas into monotonic locked facts and replaceable page state."""
+    locked: list[str] = []
+    current = ""
+    remaining = ""
+
+    def append_locked(items: list[str]) -> None:
+        known = {" ".join(item.split()) for item in locked}
+        for item in items:
+            normalized = " ".join(item.split())
+            if normalized and normalized not in known:
+                locked.append(item)
+                known.add(normalized)
+
+    def merge_legacy(text: str) -> None:
+        nonlocal current, remaining
+        additions, legacy_current, legacy_remaining = _general_compact_legacy_fields(text)
+        append_locked(additions)
+        if legacy_current:
+            current = legacy_current
+        if legacy_remaining:
+            remaining = legacy_remaining
+
+    for turn in history:
+        raw = _history_raw_response(turn).strip()
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, list) and len(parsed) == 1:
+            parsed = parsed[0]
+
+        parsed_memory = parsed.get("memory") if isinstance(parsed, dict) else None
+        structured_memory = _general_compact_structured_memory(parsed)
+        if structured_memory is not None:
+            additions = _general_compact_memory_items(structured_memory.get("add"))
+            removals = _general_compact_memory_items(structured_memory.get("drop"))
+            # Deletion is fail-closed: exact old text and a same-turn replacement
+            # are required, so a weak model cannot erase stable facts casually.
+            if additions and removals:
+                removal_keys = {" ".join(item.split()) for item in removals}
+                locked[:] = [
+                    item for item in locked if " ".join(item.split()) not in removal_keys
+                ]
+            append_locked(additions)
+            new_current = structured_memory.get("current")
+            new_remaining = structured_memory.get("remaining")
+            if isinstance(new_current, str) and new_current.strip():
+                current = new_current.strip()
+            if isinstance(new_remaining, str) and new_remaining.strip():
+                remaining = new_remaining.strip()
+            continue
+
+        legacy = ""
+        if isinstance(parsed_memory, str) and parsed_memory.strip():
+            legacy = parsed_memory.strip()
+        elif isinstance(parsed, dict):
+            parsed_result = parsed.get("result")
+            if isinstance(parsed_result, str) and parsed_result.strip():
+                legacy = parsed_result.strip()
+        if not legacy:
+            stored_result = str(getattr(turn, "state_summary", "") or "").strip()
+            if stored_result and not stored_result.startswith(("{", "[")):
+                legacy = stored_result
+        if not legacy and isinstance(parsed, dict):
+            parsed_intent = parsed.get("intent")
+            if isinstance(parsed_intent, str) and parsed_intent.strip():
+                legacy = parsed_intent.strip()
+        if not legacy:
+            stored_intent = str(getattr(turn, "action_intent", "") or "").strip()
+            if stored_intent and not stored_intent.startswith(("{", "[")):
+                legacy = stored_intent
+        if legacy:
+            merge_legacy(legacy)
+
+    if not locked and not current and not remaining:
+        return ""
+    locked_text = "\n".join(f"- {item}" for item in locked) if locked else "- 无"
+    return (
+        f"已确认/锁定：\n{locked_text}\n"
+        f"当前：{current or '未知'}\n"
+        f"剩余：{remaining or '未知'}"
+    )
+
+
 def _general_user_message(
     observation: Observation,
     *,
@@ -780,6 +1024,7 @@ def _general_user_message(
     ask_user_response: Any,
     instruction: str | None,
     model_name: str,
+    image_scale_ratio: float,
 ) -> dict[str, Any]:
     content: list[dict[str, Any]] = []
     if instruction is not None:
@@ -788,7 +1033,13 @@ def _general_user_message(
         content.append({"type": "text", "text": f"Tool call result: {tool_result}"})
     elif ask_user_response is not None:
         content.append({"type": "text", "text": str(ask_user_response)})
-    content.append(_general_e2e_image_content(observation, model_name=model_name))
+    content.append(
+        _general_e2e_image_content(
+            observation,
+            model_name=model_name,
+            image_scale_ratio=image_scale_ratio,
+        )
+    )
     return {"role": "user", "content": content}
 
 
@@ -830,11 +1081,16 @@ def _gui_owl_image_content(
     }
 
 
-def _general_e2e_image_content(observation: Observation, *, model_name: str) -> dict[str, Any]:
+def _general_e2e_image_content(
+    observation: Observation,
+    *,
+    model_name: str,
+    image_scale_ratio: float,
+) -> dict[str, Any]:
     return {
         "type": "image_url",
         "image_url": {
-            "url": f"data:image/png;base64,{_general_e2e_observation_base64(observation, model_name=model_name)}"
+            "url": f"data:image/png;base64,{_general_e2e_observation_base64(observation, model_name=model_name, image_scale_ratio=image_scale_ratio)}"
         },
     }
 
@@ -924,12 +1180,24 @@ def _gui_owl_smart_resize(height: int, width: int) -> tuple[int, int]:
     return resized_height, resized_width
 
 
-def _general_e2e_observation_base64(observation: Observation, *, model_name: str) -> str:
+def _general_e2e_observation_base64(
+    observation: Observation,
+    *,
+    model_name: str,
+    image_scale_ratio: float,
+) -> str:
     if not observation.screenshot_path:
         raise ValueError("MobileWorld profiles require screenshots.")
     path = Path(observation.screenshot_path)
     with Image.open(path) as image:
         image = image.convert("RGB")
+        ratio = normalize_image_scale_ratio(image_scale_ratio)
+        scaled_size = (
+            max(1, int(image.width * ratio)),
+            max(1, int(image.height * ratio)),
+        )
+        if image.size != scaled_size:
+            image = image.resize(scaled_size, Image.Resampling.LANCZOS)
         model = model_name.lower()
         if "opus-4" in model or "opus_4" in model:
             image, _, _ = pil_adaptive_resize(image, _CLAUDE_OPUS_MAX_DIMENSION)
@@ -1233,6 +1501,8 @@ def _to_guiclaw_payload(action: dict[str, Any], *, summary: str) -> dict[str, An
         payload.update({"action_type": "enter"})
     elif action_type in {WAIT, "wait"}:
         payload.update({"action_type": "wait"})
+        if action.get("duration_ms") is not None:
+            payload["duration_ms"] = action["duration_ms"]
     elif action_type in {ANSWER, FINISHED, "answer", "finished"}:
         payload.update(
             {"action_type": "done", "status": _done_status(action), "text": action.get("text", "")}

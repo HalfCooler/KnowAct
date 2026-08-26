@@ -256,6 +256,92 @@ def test_trajectory_recorder_embeds_minimal_failed_skill_data_in_step(tmp_path: 
     ]
 
 
+def test_initial_skill_result_persists_compact_skill_and_subgoal_timings(
+    tmp_path: Path,
+) -> None:
+    rec = TrajectoryRecorder(output_dir=tmp_path, task="Play first result", platform="android")
+    path = rec.start()
+    rec.record_event("initial_skill_candidates", query="Play first result", top_k=5)
+    rec.record_event(
+        "skill_execution_start",
+        skill_id="skill-1",
+        skill_name="search_and_play",
+    )
+    rec.record_event(
+        "subgoal_step",
+        goal="search input is focused",
+        substep_index=1,
+        action={"action_type": "tap", "x": 100, "y": 200},
+        action_summary="tap search input",
+        goal_reached=False,
+        duration_s=0.8,
+        inference_time_s=0.35,
+        token_usage={"prompt_tokens": 20, "completion_tokens": 5},
+    )
+    rec.record_event(
+        "skill_step",
+        skill_id="skill-1",
+        skill_name="search_and_play",
+        step_index=0,
+        target="search input",
+        action={"action_type": "input_text", "text": "query"},
+        action_summary="type query",
+        grounding_mode="llm",
+        valid_state_check=True,
+        recovery_attempted=True,
+        recovery_success=True,
+        duration_s=1.2,
+        inference_time_s=0.45,
+        validate_inference_time_s=0.1,
+        grounding_inference_time_s=0.35,
+    )
+    rec.record_event(
+        "skill_execution_result",
+        skill_id="skill-1",
+        skill_name="search_and_play",
+        state="succeeded",
+    )
+    rec.record_event(
+        "initial_skill_execution_result",
+        skill_id="skill-1",
+        skill_name="search_and_play",
+        state="succeeded",
+        summary="skill completed",
+    )
+
+    trajectory = json.loads(path.read_text(encoding="utf-8"))
+    execution = trajectory["initial_skill_selectors"][0]["execution_result"]
+    assert trajectory["steps"] == []
+    assert execution["steps"] == [
+        {
+            "step_index": 0,
+            "target": "search input",
+            "action": {"action_type": "input_text", "text": "query"},
+            "action_summary": "type query",
+            "grounding_mode": "llm",
+            "valid_state_check": True,
+            "recovery_attempted": True,
+            "recovery_success": True,
+            "duration_s": 1.2,
+            "inference_time_s": 0.45,
+            "validate_inference_time_s": 0.1,
+            "grounding_inference_time_s": 0.35,
+        }
+    ]
+    assert execution["subgoal_steps"] == [
+        {
+            "goal": "search input is focused",
+            "substep_index": 1,
+            "action": {"action_type": "tap", "x": 100, "y": 200},
+            "action_summary": "tap search input",
+            "goal_reached": False,
+            "token_usage": {"prompt_tokens": 20, "completion_tokens": 5},
+            "duration_s": 0.8,
+            "inference_time_s": 0.35,
+        }
+    ]
+
+
 def test_trajectory_recorder_not_started_raises(tmp_path: Path) -> None:
     """Calling record_step() before start() raises RuntimeError."""
     rec = TrajectoryRecorder(output_dir=tmp_path, task="test", platform="android")

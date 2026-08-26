@@ -532,6 +532,9 @@ class PostRunProcessor:
                     )
                     if skill_id is not None:
                         compiled_skill_ids.append(skill_id)
+                optimization_report = await library.optimize_shortcut_prefixes(
+                    focus_skill_ids=compiled_skill_ids,
+                )
 
             await self._write_result_section(
                 trace_path,
@@ -548,6 +551,7 @@ class PostRunProcessor:
                     "learning_mode": _learning_mode(is_success),
                     "updated_functions": [skill.name for skill in skills],
                     "compiled_skill_ids": compiled_skill_ids,
+                    "shortcut_optimization": optimization_report,
                     "source_path": str((store_root / "skills.py").expanduser()),
                     "extractor_diagnostics": extractor.last_diagnostics,
                     "skills": skill_infos,

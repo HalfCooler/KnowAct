@@ -1230,6 +1230,17 @@ class SkillExecutor:
     def _record_skill_step(self, skill: Skill, step: SkillStep, step_result: StepResult) -> None:
         if self.trajectory_recorder is None:
             return
+        validate_inference_time_s = step_result.validate_duration_s
+        grounding_inference_time_s = (
+            step_result.grounding_duration_s
+            if step_result.grounding_mode == "llm"
+            else None
+        )
+        inference_parts = [
+            value
+            for value in (validate_inference_time_s, grounding_inference_time_s)
+            if value is not None
+        ]
         timings: dict[str, float] = {}
         for src in (self.action_grounder, self.state_validator):
             drain = getattr(src, "drain_timings", None)
@@ -1265,6 +1276,13 @@ class SkillExecutor:
             else None,
             grounding_duration_s=round(step_result.grounding_duration_s, 3)
             if step_result.grounding_duration_s is not None
+            else None,
+            inference_time_s=round(sum(inference_parts), 3) if inference_parts else None,
+            validate_inference_time_s=round(validate_inference_time_s, 3)
+            if validate_inference_time_s is not None
+            else None,
+            grounding_inference_time_s=round(grounding_inference_time_s, 3)
+            if grounding_inference_time_s is not None
             else None,
             chat_latency_s=round(timings["chat_latency_s"], 3)
             if "chat_latency_s" in timings

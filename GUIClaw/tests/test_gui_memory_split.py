@@ -93,6 +93,54 @@ async def test_gui_agent_policy_does_not_replace_memory_retrieval(tmp_path: Path
     mock_retriever.search.assert_called()
 
 
+@pytest.mark.asyncio
+async def test_gui_agent_excludes_retrieved_policy_when_direct_policy_exists(
+    tmp_path: Path,
+) -> None:
+    """Direct policy injection must not duplicate POLICY retrieval context."""
+    from guiclaw.agent import GuiAgent
+    from guiclaw.backends.dry_run import DryRunBackend
+    from guiclaw.memory.types import MemoryEntry, MemoryType
+    from guiclaw.trajectory.recorder import TrajectoryRecorder
+
+    policy = MemoryEntry(
+        entry_id="policy-1",
+        memory_type=MemoryType.POLICY,
+        platform="android",
+        content="Deny unrequested permissions.",
+    )
+    app_guide = MemoryEntry(
+        entry_id="app-1",
+        memory_type=MemoryType.APP_GUIDE,
+        platform="android",
+        app="com.qiyi.video",
+        content="Tap the search field before typing.",
+    )
+    mock_retriever = MagicMock()
+    mock_retriever.search = AsyncMock(return_value=[(policy, 1.0), (app_guide, 0.8)])
+    mock_retriever.format_context.side_effect = lambda results: "\n".join(
+        entry.content for entry, _score in results
+    )
+    recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task="search iQIYI")
+    recorder.start()
+    agent = GuiAgent(
+        llm=MagicMock(),
+        backend=DryRunBackend(),
+        trajectory_recorder=recorder,
+        policy_context=policy.content,
+        memory_retriever=mock_retriever,
+    )
+
+    result = await agent._retrieve_memory("search iQIYI")
+
+    assert result == app_guide.content
+    mock_retriever.search.assert_awaited_once()
+    formatted_results = mock_retriever.format_context.call_args.args[0]
+    assert [entry.memory_type for entry, _score in formatted_results] == [
+        MemoryType.APP_GUIDE
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Test 6: GuiAgent falls back to retriever when policy_context is None
 # ---------------------------------------------------------------------------

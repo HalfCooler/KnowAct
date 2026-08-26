@@ -78,6 +78,7 @@ _ANDROID_PACKAGE_DISPLAY_NAMES: dict[str, str] = {
     "com.qiyi.video": "爱奇艺/iQIYI",
     "com.tencent.qqlive": "腾讯视频/Tencent Video",
     "com.youku.phone": "优酷/Youku",
+    "com.phoenix.read": "红果免费短剧/红果/Hongguo",
     "com.smile.gifmaker": "快手/Kuaishou",
     "com.kuaishou.nebula": "快手极速版/Kuaishou Lite",
     "com.ss.android.article.news": "今日头条/Toutiao",
