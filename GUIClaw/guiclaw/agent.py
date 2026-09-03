@@ -786,6 +786,9 @@ class GuiAgent:
                         action_summary=initial_skill_summary,
                         action_intent=initial_skill_summary,
                         state_summary=initial_skill_summary,
+                        raw_response_content=self._initial_skill_compact_memory(
+                            initial_skill_summary
+                        ),
                     )
                 )
         previous_fingerprint: _ScreenFingerprint | None = None
@@ -3379,6 +3382,24 @@ class GuiAgent:
                 f"{failed_summary}，但技能执行未成功，请根据当前页面继续。"
             )
         return next_observation, usage, handoff_summary, state == "succeeded"
+
+    def _initial_skill_compact_memory(self, summary: str) -> str | None:
+        """Seed compact rolling memory so remaining constraints survive skill handoff."""
+        if self.agent_profile != "general_compact":
+            return None
+        return json.dumps(
+            {
+                "action_type": "wait",
+                "memory": {
+                    "add": [summary],
+                    "current": "技能已执行，当前页待核对",
+                    "remaining": (
+                        "完成 Instruction 中尚未落地的约束；结果页筛选/排序/条件必须执行"
+                    ),
+                },
+            },
+            ensure_ascii=False,
+        )
 
     async def _build_prompt_skill_parts(
         self,

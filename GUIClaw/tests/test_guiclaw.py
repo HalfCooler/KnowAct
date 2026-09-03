@@ -511,6 +511,8 @@ async def test_initial_skill_selector_executes_deeplink_then_hands_off_to_small_
     assert skill.skill_id not in small_model_prompt
     assert "Memory state:" in small_model_prompt
     assert "已确认/锁定：\n- 已使用视频搜索 API 搜索 cats。" in small_model_prompt
+    assert "剩余：完成 Instruction 中尚未落地的约束；结果页筛选/排序/条件必须执行" in small_model_prompt
+    assert "剩余：未知" not in small_model_prompt
     assert "Previous intents:" not in small_model_prompt
     assert "Step 1:" not in small_model_prompt
     assert recorder.path is not None
@@ -716,6 +718,7 @@ async def test_initial_skill_failure_still_hands_current_screen_to_small_model(
     failure_prompt = _messages_text(small_llm.calls[0])
     assert "已尝试使用视频搜索 API 搜索 cats" in failure_prompt
     assert "技能执行未成功" in failure_prompt
+    assert "结果页筛选/排序/条件必须执行" in failure_prompt
 
 
 @pytest.mark.asyncio

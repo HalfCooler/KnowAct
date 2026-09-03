@@ -104,6 +104,8 @@ def test_general_compact_uses_rolling_memory_contract(tmp_path: Path) -> None:
     assert "原始任务定义唯一目标" in system_prompt
     assert "当前截图只用于验证状态和定位控件" in system_prompt
     assert "不得从结果页控件推导新目标" in system_prompt
+    assert "筛选/排序/条件属原任务，必须点击落地" in system_prompt
+    assert "仅出结果列表不算完成" in system_prompt
     assert "截图验证全部明确要求后禁止继续操作" in system_prompt
     assert "只能 answer/status" in system_prompt
     assert "remaining 只写原始任务中明确且尚未完成的事项" in system_prompt
@@ -119,7 +121,7 @@ def test_general_compact_uses_rolling_memory_contract(tmp_path: Path) -> None:
     assert "duration_ms=1000|3000|5000|10000|30000|60000" in system_prompt
     assert "Thought:" not in system_prompt
     assert "<tool_call>" not in system_prompt
-    assert len(system_prompt) < 1_200
+    assert len(system_prompt) < 1_400
     assert messages[1]["content"][0]["text"] == "Instruction: Open Settings"
 
 
