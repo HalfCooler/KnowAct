@@ -44,6 +44,16 @@ from guiclaw.interfaces import (
 )
 from guiclaw.observation import Observation
 from guiclaw.paths import DEFAULT_GUI_RUNS_DIR, DEFAULT_SHORTCUT_CACHE_DIR
+from guiclaw.planner_escalation import (
+    RepeatVerdict,
+    build_repeat_escalation_hint,
+    build_repeat_judge_text,
+    canonicalize_repeat_judge_model,
+    observation_ui_tree,
+    parse_repeat_verdict,
+    should_judge_repeat,
+    ui_tree_difference_ratio,
+)
 from guiclaw.skills.compact_prompt import (
     ALWAYS_ON_SKILL_TAG,
     COMPOSITE_ACTION_DEFINITIONS,
@@ -345,6 +355,13 @@ class GuiAgent:
             profile default (GUI-Owl: 5; other profiles: 1).
         progress_callback: Optional async callback for progress reporting.
         stagnation_limit: Consecutive unchanged-screen transitions before abort.
+        planner_llm: Optional larger model used for one-shot replanning when a
+            same-type action on a nearly unchanged UI tree is judged a repeat.
+        enable_repeat_escalation: When True and ``planner_llm`` is set, same-type
+            plans on highly similar UI trees are judged and confirmed repeats
+            are replanned by the planner.
+        repeat_judge_model: Which model judges repeats: ``small`` (GUI llm) or
+            ``large`` (planner_llm). Defaults to ``small``.
     """
 
     _MAX_TOOL_RETRIES = 3
@@ -391,6 +408,9 @@ class GuiAgent:
         initial_skill_selector_llm: LLMProvider | None = None,
         enable_initial_skill_selector: bool = False,
         initial_skill_top_k: int = 5,
+        planner_llm: LLMProvider | None = None,
+        enable_repeat_escalation: bool = True,
+        repeat_judge_model: str = "small",
     ) -> None:
         self.llm = llm
         self.backend = backend
@@ -423,6 +443,9 @@ class GuiAgent:
         self._skill_executor = skill_executor
         self._initial_skill_selector_llm = initial_skill_selector_llm
         self._enable_initial_skill_selector = bool(enable_initial_skill_selector)
+        self._planner_llm = planner_llm
+        self._enable_repeat_escalation = bool(enable_repeat_escalation) and planner_llm is not None
+        self._repeat_judge_model = canonicalize_repeat_judge_model(repeat_judge_model)
         try:
             parsed_initial_skill_top_k = int(initial_skill_top_k)
         except (TypeError, ValueError):
@@ -793,6 +816,8 @@ class GuiAgent:
                 )
         previous_fingerprint: _ScreenFingerprint | None = None
         previous_action_type: str | None = None
+        previous_action: Action | None = None
+        previous_observation: Observation | None = None
         stagnation_streak = 0
         if self.stagnation_limit > 0:
             previous_fingerprint = self._build_screen_fingerprint(obs)
@@ -818,6 +843,9 @@ class GuiAgent:
                         step_index=step_index,
                         total_steps=self.max_steps,
                         current_observation=obs,
+                        previous_action=previous_action,
+                        previous_observation=previous_observation,
+                        task=task,
                     ),
                     timeout=self.step_timeout * 3,
                 )
@@ -1060,6 +1088,8 @@ class GuiAgent:
                     result=result,
                 )
             )
+            previous_action = result.action
+            previous_observation = obs
 
             if result.next_observation is not None:
                 obs = result.next_observation
@@ -1234,6 +1264,124 @@ class GuiAgent:
             step_ttft_s=step_ttft_s,
         )
 
+    def _repeat_judge_llm(self) -> LLMProvider:
+        if self._repeat_judge_model == "large" and self._planner_llm is not None:
+            return self._planner_llm
+        return self.llm
+
+    async def _repeat_replan_decision(
+        self,
+        *,
+        previous_action: Action | None,
+        proposed_action: Action,
+        current_observation: Observation,
+        previous_observation: Observation | None,
+        task: str,
+        messages: list[dict[str, Any]],
+        original_messages: list[dict[str, Any]],
+        step_usage: dict[str, int],
+        escalated: bool,
+        step_index: int,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Judge a same-type plan and rewrite ``messages`` for planner replan.
+
+        Returns ``(should_replan, judge_snapshot)``.
+        """
+        previous_tree = observation_ui_tree(previous_observation)
+        current_tree = observation_ui_tree(current_observation)
+        if (
+            escalated
+            or not self._enable_repeat_escalation
+            or self._planner_llm is None
+            or not should_judge_repeat(
+                previous_action,
+                proposed_action,
+                previous_tree=previous_tree,
+                current_tree=current_tree,
+            )
+        ):
+            return False, None
+        assert previous_action is not None
+
+        verdict, judge_usage = await self._judge_repeated_action(
+            task=task,
+            previous_action=previous_action,
+            proposed_action=proposed_action,
+            current_observation=current_observation,
+        )
+        for key, value in judge_usage.items():
+            step_usage[key] = step_usage.get(key, 0) + value
+        snapshot = {
+            "judge_model": self._repeat_judge_model,
+            "previous_action_type": previous_action.action_type,
+            "proposed_action_type": proposed_action.action_type,
+            "ui_tree_difference": ui_tree_difference_ratio(previous_tree, current_tree),
+            "repeated": verdict.repeated,
+            "reason": verdict.reason,
+        }
+        self._trajectory_recorder.record_event(
+            "repeat_judge",
+            step_index=step_index,
+            **snapshot,
+        )
+        if not verdict.repeated:
+            return False, snapshot
+
+        messages[:] = list(original_messages)
+        messages.append(
+            {
+                "role": "user",
+                "content": build_repeat_escalation_hint(
+                    previous=previous_action,
+                    proposed=proposed_action,
+                    reason=verdict.reason,
+                ),
+            }
+        )
+        self._trajectory_recorder.record_event(
+            "planner_escalation",
+            step_index=step_index,
+            reason=verdict.reason or "repeat_confirmed",
+            previous_action_type=previous_action.action_type,
+            proposed_action_type=proposed_action.action_type,
+        )
+        return True, snapshot
+
+    async def _judge_repeated_action(
+        self,
+        *,
+        task: str,
+        previous_action: Action,
+        proposed_action: Action,
+        current_observation: Observation,
+    ) -> tuple[RepeatVerdict, dict[str, int]]:
+        prompt = build_repeat_judge_text(
+            task=task,
+            previous=previous_action,
+            proposed=proposed_action,
+        )
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        screenshot = Path(current_observation.screenshot_path or "")
+        if screenshot.is_file():
+            try:
+                content.append(self._image_block(screenshot))
+            except Exception:
+                logger.debug("Repeat judge skipped screenshot for %s", screenshot, exc_info=True)
+        try:
+            response = await self._repeat_judge_llm().chat(
+                messages=[{"role": "user", "content": content}],
+                tools=None,
+            )
+        except Exception as exc:
+            logger.warning("Repeat judge failed; treating as not-repeat: %s", exc)
+            return RepeatVerdict(repeated=False, reason=f"judge_error: {exc}"), {}
+        usage = {
+            str(key): int(value)
+            for key, value in (response.usage or {}).items()
+            if isinstance(value, int)
+        }
+        return parse_repeat_verdict(response.content), usage
+
     async def _run_step(
         self,
         messages: list[dict[str, Any]],
@@ -1241,6 +1389,9 @@ class GuiAgent:
         step_index: int,
         total_steps: int,
         current_observation: Observation,
+        previous_action: Action | None = None,
+        previous_observation: Observation | None = None,
+        task: str = "",
     ) -> StepResult:
         """Execute a single vision-action step with retries on malformed calls."""
         _step_start = time.monotonic()
@@ -1250,6 +1401,10 @@ class GuiAgent:
         step_usage: dict[str, int] = {}
         step_chat_latency_s: float = 0.0
         step_ttft_s: float | None = None
+        actor: LLMProvider = self.llm
+        escalated = False
+        repeat_judge_snapshot: dict[str, Any] | None = None
+        original_messages = list(messages)
 
         while retries_left > 0:
             retries_left -= 1
@@ -1267,7 +1422,7 @@ class GuiAgent:
                 chat_kwargs["max_tokens"] = self._step_max_tokens
             inference_started_at = time.time()
             try:
-                response: LLMResponse = await self.llm.chat(**chat_kwargs)
+                response: LLMResponse = await actor.chat(**chat_kwargs)
             finally:
                 step_chat_latency_s += time.time() - inference_started_at
             for k, v in (response.usage or {}).items():
@@ -1373,6 +1528,33 @@ class GuiAgent:
                 special_action_type == "use_skill"
                 or special_action_type in self._prompt_composite_aliases
             ):
+                special_action = Action(
+                    action_type=special_action_type,
+                    text=str(
+                        (tool_call.arguments or {}).get("skill_id")
+                        or (tool_call.arguments or {}).get("text")
+                        or ""
+                    ),
+                )
+                replan, judge_snapshot = await self._repeat_replan_decision(
+                    previous_action=previous_action,
+                    proposed_action=special_action,
+                    current_observation=current_observation,
+                    previous_observation=previous_observation,
+                    task=task,
+                    messages=messages,
+                    original_messages=original_messages,
+                    step_usage=step_usage,
+                    escalated=escalated,
+                    step_index=step_index,
+                )
+                if judge_snapshot is not None:
+                    repeat_judge_snapshot = judge_snapshot
+                if replan:
+                    actor = self._planner_llm or self.llm
+                    escalated = True
+                    retries_left = self._MAX_TOOL_RETRIES + 1
+                    continue
                 try:
                     return await self._dispatch_prompt_special_action(
                         tool_call=tool_call,
@@ -1415,6 +1597,26 @@ class GuiAgent:
                     model_snapshot=assistant_snapshot,
                 )
 
+            replan, judge_snapshot = await self._repeat_replan_decision(
+                previous_action=previous_action,
+                proposed_action=action,
+                current_observation=current_observation,
+                previous_observation=previous_observation,
+                task=task,
+                messages=messages,
+                original_messages=original_messages,
+                step_usage=step_usage,
+                escalated=escalated,
+                step_index=step_index,
+            )
+            if judge_snapshot is not None:
+                repeat_judge_snapshot = judge_snapshot
+            if replan:
+                actor = self._planner_llm or self.llm
+                escalated = True
+                retries_left = self._MAX_TOOL_RETRIES + 1
+                continue
+
             # Report progress
             if self.progress_callback is not None:
                 await self.progress_callback(
@@ -1440,6 +1642,9 @@ class GuiAgent:
                 action_intent=action_summary,
                 state_summary=state_summary,
             )
+            model_snapshot["actor"] = "planner" if escalated else "gui"
+            if repeat_judge_snapshot is not None:
+                model_snapshot["repeat_judge"] = repeat_judge_snapshot
 
             # Handle terminal action (done)
             if action.action_type == "done":

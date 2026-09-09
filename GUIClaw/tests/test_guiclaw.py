@@ -355,6 +355,82 @@ def _done_response(*, status: str = "success") -> LLMResponse:
     )
 
 
+def _tap_response(*, step: int = 1, x: int = 100, y: int = 200) -> LLMResponse:
+    return LLMResponse(
+        content=f"tap {step}",
+        tool_calls=[
+            ToolCall(
+                id=f"call-tap-{step}",
+                name="computer_use",
+                arguments={"action_type": "tap", "x": x, "y": y},
+            )
+        ],
+    )
+
+
+def _repeat_judge_response(repeated: bool, *, reason: str = "") -> LLMResponse:
+    return LLMResponse(
+        content=json.dumps(
+            {
+                "repeat": repeated,
+                "reason": reason or ("same control" if repeated else "different target"),
+            }
+        ),
+        tool_calls=None,
+    )
+
+
+_STABLE_UI_TREE = [
+    {"resource_id": "com.app:id/title", "text": "Home", "class": "TextView", "enabled": True},
+    {"resource_id": "com.app:id/search", "text": "Search", "class": "Button", "clickable": True},
+    {"resource_id": "com.app:id/item", "text": "Result", "class": "TextView", "clickable": True},
+]
+_CHANGED_UI_TREE = [
+    {"resource_id": "com.app:id/query", "text": "Query", "class": "EditText", "enabled": True},
+    {"resource_id": "com.app:id/submit", "text": "Go", "class": "Button", "clickable": True},
+    {"resource_id": "com.app:id/hint", "text": "Type here", "class": "TextView"},
+]
+
+
+class _RecordingBackend(DryRunBackend):
+    def __init__(
+        self,
+        *,
+        ui_tree: list[dict[str, Any]] | None = None,
+        ui_trees: list[list[dict[str, Any]]] | None = None,
+        include_ui_tree: bool = True,
+    ) -> None:
+        super().__init__()
+        self.actions: list[Action] = []
+        self._include_ui_tree = include_ui_tree
+        self._ui_tree = ui_tree
+        self._ui_trees = list(ui_trees) if ui_trees is not None else None
+
+    async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+        observation = await super().observe(screenshot_path, timeout=timeout)
+        if not self._include_ui_tree:
+            return observation
+        if self._ui_trees:
+            index = min(len(self.actions), len(self._ui_trees) - 1)
+            tree = self._ui_trees[index]
+        elif self._ui_tree is not None:
+            tree = self._ui_tree
+        elif self._ui_trees is not None:
+            tree = []
+        else:
+            tree = list(_STABLE_UI_TREE)
+        observation.extra = {"ui_tree": tree}
+        return observation
+
+    async def execute(self, action: Action, timeout: float = 5.0) -> str:
+        self.actions.append(action)
+        return await super().execute(action, timeout=timeout)
+
+
+def _is_repeat_judge_call(messages: list[dict[str, Any]]) -> bool:
+    return "share the same action type" in _messages_text(messages)
+
+
 @pytest.mark.asyncio
 async def test_prompt_skill_selection_injects_and_dispatches_use_skill(tmp_path: Path) -> None:
     library = FlatSkillLibrary(store_dir=tmp_path / "skills")
@@ -4096,6 +4172,197 @@ async def test_agent_stagnation_detection_terminates_before_max_steps(tmp_path: 
     assert "Remaining:" in result.summary
     assert "Current:" in result.summary
     assert "Resume:" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_same_action_type_judge_not_repeat_keeps_small_model(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    backend = _RecordingBackend()
+    small = _RecordingLLM(
+        [
+            _tap_response(step=1, x=10, y=10),
+            _tap_response(step=2, x=80, y=90),
+            _repeat_judge_response(False, reason="different button"),
+            _done_response(),
+        ]
+    )
+    planner = _RecordingLLM([])
+    agent = GuiAgent(
+        small,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "not repeat", events=events),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        planner_llm=planner,
+        enable_repeat_escalation=True,
+        repeat_judge_model="small",
+    )
+
+    result = await agent.run("Tap two different buttons", max_retries=1)
+
+    assert result.success
+    assert [action.action_type for action in backend.actions] == ["tap", "tap"]
+    assert backend.actions[0].x == 10
+    assert backend.actions[1].x == 80
+    assert len(planner.calls) == 0
+    assert any(_is_repeat_judge_call(call) for call in small.calls)
+    assert any(event.get("type") == "repeat_judge" and event.get("repeated") is False for event in events)
+    assert all(event.get("type") != "planner_escalation" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_same_action_type_confirmed_repeat_replans_with_planner(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    backend = _RecordingBackend()
+    small = _RecordingLLM(
+        [
+            _tap_response(step=1, x=10, y=10),
+            _tap_response(step=2, x=11, y=10),
+            _repeat_judge_response(True, reason="same button"),
+        ]
+    )
+    planner = _RecordingLLM([_done_response()])
+    agent = GuiAgent(
+        small,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "repeat escalate", events=events),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        planner_llm=planner,
+        enable_repeat_escalation=True,
+        repeat_judge_model="small",
+    )
+
+    result = await agent.run("Open the result", max_retries=1)
+
+    assert result.success
+    assert [action.action_type for action in backend.actions] == ["tap"]
+    assert backend.actions[0].x == 10
+    assert len(planner.calls) == 1
+    assert "rejected as a repeat" in _messages_text(planner.calls[0])
+    assert any(event.get("type") == "planner_escalation" for event in events)
+    assert any(event.get("type") == "repeat_judge" and event.get("repeated") is True for event in events)
+
+
+@pytest.mark.asyncio
+async def test_different_action_type_skips_repeat_judge(tmp_path: Path) -> None:
+    backend = _RecordingBackend()
+    small = _RecordingLLM(
+        [
+            _tap_response(step=1),
+            _done_response(),
+        ]
+    )
+    planner = _RecordingLLM([])
+    agent = GuiAgent(
+        small,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "different types"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+        planner_llm=planner,
+        enable_repeat_escalation=True,
+    )
+
+    result = await agent.run("Tap then finish", max_retries=1)
+
+    assert result.success
+    assert [action.action_type for action in backend.actions] == ["tap"]
+    assert len(planner.calls) == 0
+    assert not any(_is_repeat_judge_call(call) for call in small.calls)
+
+
+@pytest.mark.asyncio
+async def test_repeat_judge_can_use_large_model(tmp_path: Path) -> None:
+    backend = _RecordingBackend()
+    small = _RecordingLLM(
+        [
+            _tap_response(step=1, x=10, y=10),
+            _tap_response(step=2, x=11, y=10),
+        ]
+    )
+    planner = _RecordingLLM(
+        [
+            _repeat_judge_response(True, reason="same button"),
+            _done_response(),
+        ]
+    )
+    agent = GuiAgent(
+        small,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "large judge"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        planner_llm=planner,
+        enable_repeat_escalation=True,
+        repeat_judge_model="large",
+    )
+
+    result = await agent.run("Open the result", max_retries=1)
+
+    assert result.success
+    assert [action.action_type for action in backend.actions] == ["tap"]
+    assert any(_is_repeat_judge_call(call) for call in planner.calls)
+    assert not any(_is_repeat_judge_call(call) for call in small.calls)
+    assert any("rejected as a repeat" in _messages_text(call) for call in planner.calls)
+
+
+@pytest.mark.asyncio
+async def test_same_action_type_changed_ui_tree_skips_repeat_judge(tmp_path: Path) -> None:
+    backend = _RecordingBackend(ui_trees=[list(_STABLE_UI_TREE), list(_CHANGED_UI_TREE)])
+    small = _RecordingLLM(
+        [
+            _tap_response(step=1, x=10, y=10),
+            _tap_response(step=2, x=80, y=90),
+            _done_response(),
+        ]
+    )
+    planner = _RecordingLLM([])
+    agent = GuiAgent(
+        small,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "changed tree"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        planner_llm=planner,
+        enable_repeat_escalation=True,
+    )
+
+    result = await agent.run("Tap after the screen changed", max_retries=1)
+
+    assert result.success
+    assert [action.action_type for action in backend.actions] == ["tap", "tap"]
+    assert len(planner.calls) == 0
+    assert not any(_is_repeat_judge_call(call) for call in small.calls)
+
+
+@pytest.mark.asyncio
+async def test_same_action_type_missing_ui_tree_skips_repeat_judge(tmp_path: Path) -> None:
+    backend = _RecordingBackend(include_ui_tree=False)
+    small = _RecordingLLM(
+        [
+            _tap_response(step=1, x=10, y=10),
+            _tap_response(step=2, x=11, y=10),
+            _done_response(),
+        ]
+    )
+    planner = _RecordingLLM([])
+    agent = GuiAgent(
+        small,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "missing tree"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        planner_llm=planner,
+        enable_repeat_escalation=True,
+    )
+
+    result = await agent.run("Tap without ui trees", max_retries=1)
+
+    assert result.success
+    assert [action.action_type for action in backend.actions] == ["tap", "tap"]
+    assert len(planner.calls) == 0
+    assert not any(_is_repeat_judge_call(call) for call in small.calls)
 
 
 @pytest.mark.asyncio

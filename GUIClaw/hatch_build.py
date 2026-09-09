@@ -86,16 +86,28 @@ class WebUIBuildHook(BuildHookInterface):
 
     @staticmethod
     def _pick_runner() -> str | None:
+        # Resolve the real executable (e.g. npm.CMD on Windows). Returning the
+        # bare name makes subprocess.Popen fail with WinError 2 because
+        # CreateProcess does not apply PATHEXT.
         for candidate in ("bun", "npm"):
-            if shutil.which(candidate):
-                return candidate
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
         return None
 
     def _run(self, cmd: list[str], *, cwd: Path) -> None:
-        self.app.display_info(f"[webui-build] $ {' '.join(cmd)} (cwd={cwd})")
+        display = " ".join(cmd)
+        self.app.display_info(f"[webui-build] $ {display} (cwd={cwd})")
+        run_kwargs: dict = {"cwd": cwd, "check": True}
+        # Windows CreateProcess cannot execute .cmd/.bat launchers (npm.cmd)
+        # unless they go through the shell.
+        if os.name == "nt":
+            run_kwargs["shell"] = True
         try:
-            subprocess.run(cmd, cwd=cwd, check=True)
+            subprocess.run(cmd, **run_kwargs)
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"[webui-build] command not found: {display}") from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
-                f"[webui-build] command failed ({exc.returncode}): {' '.join(cmd)}"
+                f"[webui-build] command failed ({exc.returncode}): {display}"
             ) from exc

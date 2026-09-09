@@ -453,6 +453,8 @@ class GuiConfig(Base):
     shortcut_cache_dir: str = "shortcut_cache"
     max_steps: int = 15
     stagnation_limit: int = 0
+    enable_repeat_escalation: bool = True
+    repeat_judge_model: Literal["small", "large"] = "small"
     embedding_model: str | None = None
     embedding_api_key: str = ""
     embedding_api_base: str | None = None
@@ -534,6 +536,13 @@ class GuiConfig(Base):
         if value < 0:
             raise ValueError("stagnation_limit must be >= 0.")
         return value
+
+    @field_validator("repeat_judge_model")
+    @classmethod
+    def _validate_repeat_judge_model(cls, value: str) -> str:
+        from guiclaw.planner_escalation import canonicalize_repeat_judge_model
+
+        return canonicalize_repeat_judge_model(value)
 
     @field_validator("prompt_skill_top_k")
     @classmethod

@@ -1667,6 +1667,13 @@ class GuiSubagentTool(Tool):
             always_on_skill_tags=self._gui_config.always_on_skill_tags,
             shortcut_backend=shortcut_backend,
             shortcut_cache_dir=str(sc_dir),
+            planner_llm=(
+                self._postprocess_llm_adapter
+                if self._gui_config.enable_repeat_escalation
+                else None
+            ),
+            enable_repeat_escalation=self._gui_config.enable_repeat_escalation,
+            repeat_judge_model=self._gui_config.repeat_judge_model,
         )
 
         if app_hint is not None:

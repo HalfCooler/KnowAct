@@ -200,6 +200,8 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert cfg.image_scale_ratio == pytest.approx(0.5)
     assert cfg.history_image_window is None
     assert cfg.stagnation_limit == 0
+    assert cfg.enable_repeat_escalation is True
+    assert cfg.repeat_judge_model == "small"
     assert cfg.enable_skill_execution is False
     assert cfg.enable_initial_skill_selector is False
     assert cfg.initial_skill_top_k == 5
@@ -247,6 +249,8 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
         image_scale_ratio: 0.25
         history_image_window: 3
         stagnation_limit: 3
+        enable_repeat_escalation: false
+        repeat_judge_model: large
         enable_skill_execution: true
         enable_initial_skill_selector: true
         initial_skill_top_k: 7
@@ -258,6 +262,8 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert scaled.image_scale_ratio == pytest.approx(0.25)
     assert scaled.history_image_window == 3
     assert scaled.stagnation_limit == 3
+    assert scaled.enable_repeat_escalation is False
+    assert scaled.repeat_judge_model == "large"
     assert scaled.enable_skill_execution is True
     assert scaled.enable_initial_skill_selector is True
     assert scaled.initial_skill_top_k == 7
@@ -740,6 +746,9 @@ def test_standalone_cli_runs_enabled_postprocessing_before_return(
     assert postprocess_state["components_embedding"] is embedding_provider
     assert agent_state["enable_prompt_skill_selection"] is False
     assert agent_state["enable_initial_skill_selector"] is True
+    assert agent_state["planner_llm"] is postprocess_provider
+    assert agent_state["enable_repeat_escalation"] is True
+    assert agent_state["repeat_judge_model"] == "small"
     assert agent_state["initial_skill_selector_llm"] is postprocess_provider
     assert agent_state["initial_skill_top_k"] == 5
     assert postprocess_state["init"] == {

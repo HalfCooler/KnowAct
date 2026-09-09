@@ -463,6 +463,8 @@ def test_gui_config_defaults() -> None:
     assert config.shortcut_cache_dir == "shortcut_cache"
     assert config.max_steps == 15
     assert config.stagnation_limit == 0
+    assert config.enable_repeat_escalation is True
+    assert config.repeat_judge_model == "small"
     assert config.image_scale_ratio == pytest.approx(0.5)
     assert config.history_image_window is None
     assert config.agent_profile is None
@@ -485,12 +487,18 @@ def test_gui_config_validation() -> None:
     )
     assert GuiConfig.model_validate({"historyImageWindow": 3}).history_image_window == 3
     assert GuiConfig.model_validate({"stagnationLimit": 3}).stagnation_limit == 3
+    assert GuiConfig.model_validate({"repeatJudgeModel": "large"}).repeat_judge_model == "large"
+    assert GuiConfig.model_validate(
+        {"enableRepeatEscalation": False}
+    ).enable_repeat_escalation is False
     with pytest.raises(ValidationError):
         GuiConfig(backend="invalid")
     with pytest.raises(ValidationError):
         GuiConfig(agent_profile="invalid-profile")
     with pytest.raises(ValidationError):
         GuiConfig(stagnation_limit=-1)
+    with pytest.raises(ValidationError):
+        GuiConfig(repeat_judge_model="medium")
     with pytest.raises(ValidationError):
         GuiConfig(image_scale_ratio=0)
     with pytest.raises(ValidationError):

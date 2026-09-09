@@ -33,6 +33,7 @@ from guiclaw.interfaces import (
     ToolCall,
 )
 from guiclaw.memory.policy import load_policy_context
+from guiclaw.planner_escalation import canonicalize_repeat_judge_model
 from guiclaw.memory.retrieval import MemoryRetriever
 from guiclaw.memory.store import MemoryStore
 from guiclaw.paths import DEFAULT_GUI_RUNS_DIR
@@ -138,6 +139,8 @@ class CliConfig:
     initial_skill_top_k: int = 5
     enable_skill_extraction: bool = False
     enable_memory_extraction: bool = False
+    enable_repeat_escalation: bool = True
+    repeat_judge_model: str = "small"
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     agent_profile: str | None = None
     background: bool = False
@@ -552,6 +555,8 @@ def load_config(path: Path | None = None) -> CliConfig:
         initial_skill_top_k=_coerce_positive_int(raw.get("initial_skill_top_k"), default=5),
         enable_skill_extraction=_coerce_bool(raw.get("enable_skill_extraction"), default=False),
         enable_memory_extraction=_coerce_bool(raw.get("enable_memory_extraction"), default=False),
+        enable_repeat_escalation=_coerce_bool(raw.get("enable_repeat_escalation"), default=True),
+        repeat_judge_model=_coerce_repeat_judge_model(raw.get("repeat_judge_model")),
         evaluation=evaluation,
         agent_profile=_optional_string(raw, "agent_profile"),
     )
@@ -711,12 +716,17 @@ async def _execute_agent(
         or config.enable_memory_extraction
         or config.evaluation.enabled
     )
+    needs_postprocess_llm = config.postprocess_provider is not None and (
+        initial_skill_selector_enabled
+        or postprocessing_enabled
+        or config.enable_repeat_escalation
+    )
     auxiliary_provider = (
         build_llm_provider(config.postprocess_provider)
-        if config.postprocess_provider is not None
-        and (initial_skill_selector_enabled or postprocessing_enabled)
+        if needs_postprocess_llm
         else provider
     )
+    planner_llm = auxiliary_provider if needs_postprocess_llm else None
 
     recorder = TrajectoryRecorder(output_dir=run_root, task=task, platform=backend.platform)
     if skill_executor is not None:
@@ -745,6 +755,9 @@ async def _execute_agent(
         ),
         enable_initial_skill_selector=initial_skill_selector_enabled,
         initial_skill_top_k=config.initial_skill_top_k,
+        planner_llm=planner_llm if config.enable_repeat_escalation else None,
+        enable_repeat_escalation=config.enable_repeat_escalation,
+        repeat_judge_model=config.repeat_judge_model,
         image_scale_ratio=config.image_scale_ratio,
         history_image_window=config.history_image_window,
         stagnation_limit=config.stagnation_limit,
@@ -1130,6 +1143,12 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"Expected boolean, got {value!r}")
     return value
+
+
+def _coerce_repeat_judge_model(value: Any) -> str:
+    if value is None or value == "":
+        return "small"
+    return canonicalize_repeat_judge_model(str(value))
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
