@@ -33,6 +33,7 @@ from guiclaw.interfaces import (
     ToolCall,
 )
 from guiclaw.memory.policy import load_policy_context
+from guiclaw.difficulty import resolve_difficulty_route
 from guiclaw.planner_escalation import canonicalize_repeat_judge_model
 from guiclaw.memory.retrieval import MemoryRetriever
 from guiclaw.memory.store import MemoryStore
@@ -141,6 +142,7 @@ class CliConfig:
     enable_memory_extraction: bool = False
     enable_repeat_escalation: bool = True
     repeat_judge_model: str = "small"
+    enable_difficulty_routing: bool = True
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     agent_profile: str | None = None
     background: bool = False
@@ -557,6 +559,7 @@ def load_config(path: Path | None = None) -> CliConfig:
         enable_memory_extraction=_coerce_bool(raw.get("enable_memory_extraction"), default=False),
         enable_repeat_escalation=_coerce_bool(raw.get("enable_repeat_escalation"), default=True),
         repeat_judge_model=_coerce_repeat_judge_model(raw.get("repeat_judge_model")),
+        enable_difficulty_routing=_coerce_bool(raw.get("enable_difficulty_routing"), default=True),
         evaluation=evaluation,
         agent_profile=_optional_string(raw, "agent_profile"),
     )
@@ -620,6 +623,7 @@ async def build_optional_components(
     model_name: str,
     artifacts_root: Path,
     embedding_provider: OpenAICompatibleEmbeddingProvider | None = None,
+    agent_profile: str | None = None,
 ) -> tuple[Any | None, Any | None, Any | None]:
     if embedding_provider is None and config.embedding is not None:
         embedding_provider = OpenAICompatibleEmbeddingProvider(
@@ -655,6 +659,7 @@ async def build_optional_components(
             embedding_provider=embedding_provider,
             merge_llm=provider,
         )
+    resolved_profile = config.agent_profile if agent_profile is None else agent_profile
     state_validator = LLMStateValidator(
         provider,
         image_scale_ratio=config.image_scale_ratio,
@@ -665,7 +670,7 @@ async def build_optional_components(
         action_grounder=_AgentActionGrounder(
             llm=provider,
             model=model_name,
-            agent_profile=config.agent_profile,
+            agent_profile=resolved_profile,
             image_scale_ratio=config.image_scale_ratio,
         ),
         subgoal_runner=_AgentSubgoalRunner(
@@ -674,7 +679,7 @@ async def build_optional_components(
             state_validator=state_validator,
             model=model_name,
             artifacts_root=artifacts_root,
-            agent_profile=config.agent_profile,
+            agent_profile=resolved_profile,
             step_timeout=60.0,
             image_scale_ratio=config.image_scale_ratio,
             history_image_window=config.history_image_window,
@@ -700,14 +705,6 @@ async def _execute_agent(
     skill_execution_enabled = config.enable_skill_execution and platform_skills_enabled
     skill_extraction_enabled = config.enable_skill_extraction and platform_skills_enabled
     embedding_provider = build_embedding_provider(config)
-    memory_retriever, skill_library, skill_executor = await build_optional_components(
-        config,
-        provider=provider,
-        backend=backend,
-        model_name=config.provider.model,
-        artifacts_root=run_root,
-        embedding_provider=embedding_provider,
-    )
     initial_skill_selector_enabled = (
         skill_execution_enabled and config.enable_initial_skill_selector
     )
@@ -716,17 +713,55 @@ async def _execute_agent(
         or config.enable_memory_extraction
         or config.evaluation.enabled
     )
-    needs_postprocess_llm = config.postprocess_provider is not None and (
+    needs_auxiliary_llm = config.postprocess_provider is not None and (
         initial_skill_selector_enabled
         or postprocessing_enabled
         or config.enable_repeat_escalation
+        or config.enable_difficulty_routing
     )
-    auxiliary_provider = (
+    large_llm = (
         build_llm_provider(config.postprocess_provider)
-        if needs_postprocess_llm
-        else provider
+        if needs_auxiliary_llm
+        else None
     )
-    planner_llm = auxiliary_provider if needs_postprocess_llm else None
+    auxiliary_provider = large_llm or provider
+    explicit_profile = args.agent_profile
+    difficulty_route = await resolve_difficulty_route(
+        task=task,
+        enabled=config.enable_difficulty_routing,
+        large_llm=large_llm,
+        explicit_profile=explicit_profile,
+    )
+    if difficulty_route is not None:
+        actor_llm = (large_llm or provider) if difficulty_route.use_large_model else provider
+        actor_model = (
+            config.postprocess_provider.model
+            if difficulty_route.use_large_model and config.postprocess_provider is not None
+            else config.provider.model
+        )
+        agent_profile = difficulty_route.agent_profile
+        difficulty_snapshot = difficulty_route.snapshot()
+        actor_reasoning_effort = (
+            config.postprocess_provider.reasoning_effort
+            if difficulty_route.use_large_model and config.postprocess_provider is not None
+            else config.provider.reasoning_effort
+        )
+    else:
+        actor_llm = provider
+        actor_model = config.provider.model
+        agent_profile = explicit_profile or config.agent_profile
+        difficulty_snapshot = None
+        actor_reasoning_effort = config.provider.reasoning_effort
+
+    memory_retriever, skill_library, skill_executor = await build_optional_components(
+        config,
+        provider=actor_llm,
+        backend=backend,
+        model_name=actor_model,
+        artifacts_root=run_root,
+        embedding_provider=embedding_provider,
+        agent_profile=agent_profile,
+    )
 
     recorder = TrajectoryRecorder(output_dir=run_root, task=task, platform=backend.platform)
     if skill_executor is not None:
@@ -734,10 +769,10 @@ async def _execute_agent(
         if getattr(skill_executor, "subgoal_runner", None) is not None:
             skill_executor.subgoal_runner._trajectory_recorder = recorder
     agent = GuiAgent(
-        llm=provider,
+        llm=actor_llm,
         backend=backend,
         trajectory_recorder=recorder,
-        model=config.provider.model,
+        model=actor_model,
         artifacts_root=run_root,
         max_steps=config.max_steps or 15,
         progress_callback=_make_progress_printer(json_output=args.json_output),
@@ -746,7 +781,7 @@ async def _execute_agent(
         skill_executor=skill_executor,
         intervention_handler=_build_intervention_handler(backend),
         policy_context=load_policy_context(config.memory_dir or DEFAULT_MEMORY_DIR),
-        agent_profile=args.agent_profile or config.agent_profile,
+        agent_profile=agent_profile,
         enable_prompt_skill_selection=(
             skill_execution_enabled and not initial_skill_selector_enabled
         ),
@@ -755,13 +790,14 @@ async def _execute_agent(
         ),
         enable_initial_skill_selector=initial_skill_selector_enabled,
         initial_skill_top_k=config.initial_skill_top_k,
-        planner_llm=planner_llm if config.enable_repeat_escalation else None,
+        planner_llm=large_llm if config.enable_repeat_escalation else None,
         enable_repeat_escalation=config.enable_repeat_escalation,
         repeat_judge_model=config.repeat_judge_model,
+        difficulty_snapshot=difficulty_snapshot,
         image_scale_ratio=config.image_scale_ratio,
         history_image_window=config.history_image_window,
         stagnation_limit=config.stagnation_limit,
-        reasoning_effort=config.provider.reasoning_effort,
+        reasoning_effort=actor_reasoning_effort,
     )
     result = await agent.run(task)
     if postprocessing_enabled:

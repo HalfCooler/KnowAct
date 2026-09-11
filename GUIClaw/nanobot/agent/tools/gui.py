@@ -19,6 +19,7 @@ import numpy as np
 
 from guiclaw.agent import GuiAgent
 from guiclaw.agent_profiles import resolve_adb_capture_source
+from guiclaw.difficulty import DifficultyRoute, resolve_difficulty_route
 from guiclaw.interfaces import InterventionHandler, InterventionRequest, InterventionResolution
 from guiclaw.paths import resolve_guiclaw_data_dir
 from guiclaw.postprocessing import EvaluationConfig, PostRunProcessor
@@ -1269,9 +1270,11 @@ class GuiSubagentTool(Tool):
             model,
             capture_ttft=gui_config.capture_ttft,
         )
+        self._postprocess_model = postprocess_model or model
+        self._has_large_model = postprocess_provider is not None
         self._postprocess_llm_adapter = NanobotLLMAdapter(
             postprocess_provider or provider,
-            postprocess_model or model,
+            self._postprocess_model,
         )
         self._embedding_signature: str | None = self._resolve_embedding_signature()
         self._embedding_adapter = (
@@ -1469,6 +1472,11 @@ class GuiSubagentTool(Tool):
 
     async def _run_workflow_or_task(self, active_backend: Any, task: str, **kwargs: Any) -> str:
         run_root = self._make_run_dir()
+        difficulty_route = await resolve_difficulty_route(
+            task=task,
+            enabled=self._gui_config.enable_difficulty_routing,
+            large_llm=self._postprocess_llm_adapter if self._has_large_model else None,
+        )
         runner = GuiWorkflowRunner(
             llm=self._llm_adapter,
             run_task=self._run_task,
@@ -1484,6 +1492,7 @@ class GuiSubagentTool(Tool):
             task,
             run_root=run_root,
             original_task=task,
+            difficulty_route=difficulty_route,
             **kwargs,
         )
         payload = GuiWorkflowRunner._load_result_payload(raw_result)
@@ -1534,6 +1543,7 @@ class GuiSubagentTool(Tool):
         run_root: Path | None = None,
         subtask_index: int = 1,
         original_task: str | None = None,
+        difficulty_route: DifficultyRoute | None = None,
         **kwargs: Any,
     ) -> str:
         raw_max_retries = kwargs.pop("max_retries", 1)
@@ -1550,6 +1560,30 @@ class GuiSubagentTool(Tool):
             )
         except (TypeError, ValueError):
             max_steps = self._gui_config.max_steps
+        if difficulty_route is None:
+            difficulty_route = await resolve_difficulty_route(
+                task=original_task or task,
+                enabled=self._gui_config.enable_difficulty_routing,
+                large_llm=self._postprocess_llm_adapter if self._has_large_model else None,
+            )
+        if difficulty_route is not None:
+            actor_llm = (
+                self._postprocess_llm_adapter
+                if difficulty_route.use_large_model
+                else self._llm_adapter
+            )
+            actor_model = (
+                self._postprocess_model
+                if difficulty_route.use_large_model
+                else self._model
+            )
+            agent_profile = difficulty_route.agent_profile
+            difficulty_snapshot = difficulty_route.snapshot()
+        else:
+            actor_llm = self._llm_adapter
+            actor_model = self._model
+            agent_profile = self._gui_config.agent_profile
+            difficulty_snapshot = None
         policy_context = self._load_policy_context()
         skill_library = None
         platform_skills_enabled = skills_supported_for_platform(active_backend.platform)
@@ -1595,14 +1629,14 @@ class GuiSubagentTool(Tool):
             validator_llm = (
                 NanobotLLMAdapter(self._provider, self._gui_config.validator_model)
                 if self._gui_config.validator_model
-                else self._llm_adapter
+                else actor_llm
             )
             grounder_llm = (
                 NanobotLLMAdapter(self._provider, self._gui_config.grounder_model)
                 if self._gui_config.grounder_model
-                else self._llm_adapter
+                else actor_llm
             )
-            grounder_model = self._gui_config.grounder_model or self._model
+            grounder_model = self._gui_config.grounder_model or actor_model
 
             state_validator = LLMStateValidator(
                 validator_llm,
@@ -1614,17 +1648,17 @@ class GuiSubagentTool(Tool):
                 action_grounder=_AgentActionGrounder(
                     llm=grounder_llm,
                     model=grounder_model,
-                    agent_profile=self._gui_config.agent_profile,
+                    agent_profile=agent_profile,
                     image_scale_ratio=self._gui_config.image_scale_ratio,
                 ),
                 subgoal_runner=_AgentSubgoalRunner(
-                    llm=self._llm_adapter,
+                    llm=actor_llm,
                     backend=active_backend,
                     state_validator=state_validator,
-                    model=self._model,
+                    model=actor_model,
                     artifacts_root=artifacts_root,
                     trajectory_recorder=recorder,
-                    agent_profile=self._gui_config.agent_profile,
+                    agent_profile=agent_profile,
                     step_timeout=90.0,
                     image_scale_ratio=self._gui_config.image_scale_ratio,
                     history_image_window=self._gui_config.history_image_window,
@@ -1645,17 +1679,17 @@ class GuiSubagentTool(Tool):
         shortcut_backend = self._shortcut_discovery_backend(active_backend)
 
         agent = GuiAgent(
-            llm=self._llm_adapter,
+            llm=actor_llm,
             backend=active_backend,
             trajectory_recorder=recorder,
-            model=self._model,
+            model=actor_model,
             artifacts_root=artifacts_root,
             max_steps=max_steps,
             policy_context=policy_context,
             skill_library=skill_library,
             skill_executor=skill_executor,
             intervention_handler=self._build_intervention_handler(active_backend, task),
-            agent_profile=self._gui_config.agent_profile,
+            agent_profile=agent_profile,
             image_scale_ratio=self._gui_config.image_scale_ratio,
             history_image_window=self._gui_config.history_image_window,
             stagnation_limit=self._gui_config.stagnation_limit,
@@ -1674,6 +1708,7 @@ class GuiSubagentTool(Tool):
             ),
             enable_repeat_escalation=self._gui_config.enable_repeat_escalation,
             repeat_judge_model=self._gui_config.repeat_judge_model,
+            difficulty_snapshot=difficulty_snapshot,
         )
 
         if app_hint is not None:

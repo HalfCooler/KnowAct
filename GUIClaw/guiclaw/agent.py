@@ -44,6 +44,7 @@ from guiclaw.interfaces import (
 )
 from guiclaw.observation import Observation
 from guiclaw.paths import DEFAULT_GUI_RUNS_DIR, DEFAULT_SHORTCUT_CACHE_DIR
+from guiclaw.difficulty import format_difficulty_progress
 from guiclaw.planner_escalation import (
     RepeatVerdict,
     build_repeat_escalation_hint,
@@ -362,6 +363,10 @@ class GuiAgent:
             are replanned by the planner.
         repeat_judge_model: Which model judges repeats: ``small`` (GUI llm) or
             ``large`` (planner_llm). Defaults to ``small``.
+        difficulty_snapshot: Optional verdict from the pre-run difficulty
+            agent. Recorded on the trajectory; does not change step logic.
+            When the main actor is already the large model, repeat escalation
+            replans with that same model.
     """
 
     _MAX_TOOL_RETRIES = 3
@@ -376,6 +381,11 @@ class GuiAgent:
     _NO_SETTLE_ACTIONS = frozenset({"wait", "done", "request_intervention"})
     _STAGNATION_SSIM_SIZE = 64
     _STAGNATION_SSIM_THRESHOLD = 0.985
+    _PROGRESS_TEXT_LIMIT = 4000
+    _THOUGHT_RE = re.compile(
+        r"Thought:\s*(.*?)(?:\n\s*Action:|\Z)",
+        re.DOTALL | re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -411,6 +421,7 @@ class GuiAgent:
         planner_llm: LLMProvider | None = None,
         enable_repeat_escalation: bool = True,
         repeat_judge_model: str = "small",
+        difficulty_snapshot: dict[str, Any] | None = None,
     ) -> None:
         self.llm = llm
         self.backend = backend
@@ -446,6 +457,9 @@ class GuiAgent:
         self._planner_llm = planner_llm
         self._enable_repeat_escalation = bool(enable_repeat_escalation) and planner_llm is not None
         self._repeat_judge_model = canonicalize_repeat_judge_model(repeat_judge_model)
+        self._difficulty_snapshot = (
+            dict(difficulty_snapshot) if isinstance(difficulty_snapshot, dict) else None
+        )
         try:
             parsed_initial_skill_top_k = int(initial_skill_top_k)
         except (TypeError, ValueError):
@@ -577,6 +591,12 @@ class GuiAgent:
         self._available_apps = None
         # 1. Start trajectory recording
         self._trajectory_recorder.start(phase=ExecutionPhase.AGENT)
+        if self._difficulty_snapshot:
+            self._trajectory_recorder.record_event(
+                "difficulty_route",
+                **self._difficulty_snapshot,
+            )
+            await self._report_progress(format_difficulty_progress(self._difficulty_snapshot))
 
         # 2. Retrieve memory context (once)
         memory_context = await self._retrieve_memory(task)
@@ -1555,6 +1575,13 @@ class GuiAgent:
                     escalated = True
                     retries_left = self._MAX_TOOL_RETRIES + 1
                     continue
+                await self._report_step_progress(
+                    step_index=step_index,
+                    total_steps=total_steps,
+                    action=special_action,
+                    response=response,
+                    escalated=escalated,
+                )
                 try:
                     return await self._dispatch_prompt_special_action(
                         tool_call=tool_call,
@@ -1617,11 +1644,13 @@ class GuiAgent:
                 retries_left = self._MAX_TOOL_RETRIES + 1
                 continue
 
-            # Report progress
-            if self.progress_callback is not None:
-                await self.progress_callback(
-                    f"GUI step {step_index}/{total_steps}: {describe_action(action)}"
-                )
+            await self._report_step_progress(
+                step_index=step_index,
+                total_steps=total_steps,
+                action=action,
+                response=response,
+                escalated=escalated,
+            )
 
             action_text = self._normalize_action_text(
                 response.content,
@@ -2760,6 +2789,157 @@ class GuiAgent:
 
         return msg
 
+    async def _report_progress(self, message: str) -> None:
+        if self.progress_callback is None:
+            return
+        text = str(message or "").strip()
+        if not text:
+            return
+        await self.progress_callback(text)
+
+    async def _report_step_progress(
+        self,
+        *,
+        step_index: int,
+        total_steps: int,
+        action: Action,
+        response: LLMResponse,
+        escalated: bool = False,
+    ) -> None:
+        if self.progress_callback is None:
+            return
+        actor = "planner" if escalated else str(
+            (self._difficulty_snapshot or {}).get("actor") or "gui"
+        )
+        thinking = self._scrub_text_for_action(
+            self._extract_step_thinking(response),
+            action,
+        )
+        output = self._scrub_text_for_action(
+            self._extract_step_output(response),
+            action,
+        )
+        lines: list[str] = []
+        if thinking:
+            lines.append(self._format_progress_block(f"GUI thinking ({actor})", thinking))
+        if output:
+            lines.append(self._format_progress_block(f"GUI output ({actor})", output))
+        lines.append(
+            f"GUI step {step_index}/{total_steps}: {describe_action(action)}"
+        )
+        await self._report_progress("\n".join(line for line in lines if line))
+
+    def _extract_step_thinking(self, response: LLMResponse) -> str:
+        provider_thinking = self._thinking_text_from_value(
+            self._provider_response_field(response.raw, "reasoning_content")
+        )
+        if not provider_thinking:
+            provider_thinking = self._thinking_text_from_value(
+                self._provider_response_field(response.raw, "reasoning")
+            )
+        if not provider_thinking:
+            provider_thinking = self._thinking_text_from_value(
+                self._provider_response_field(response.raw, "thinking_blocks")
+            )
+        if provider_thinking:
+            return self._truncate_progress_text(provider_thinking)
+        thought = self._extract_thought_from_response(response.content or "")
+        return self._truncate_progress_text(thought or "")
+
+    def _extract_step_output(self, response: LLMResponse) -> str:
+        content = str(response.content or "").strip()
+        if content:
+            return self._truncate_progress_text(content)
+        tool_calls = response.tool_calls or []
+        if not tool_calls:
+            return ""
+        call = tool_calls[0]
+        try:
+            payload = json.dumps(
+                {"name": call.name, "arguments": call.arguments},
+                ensure_ascii=False,
+            )
+        except (TypeError, ValueError):
+            payload = str(call.arguments or "")
+        return self._truncate_progress_text(payload)
+
+    @classmethod
+    def _extract_thought_from_response(cls, content: str) -> str | None:
+        text = str(content or "").strip()
+        if not text:
+            return None
+        match = cls._THOUGHT_RE.search(text)
+        if match is None:
+            return None
+        thought = match.group(1).strip()
+        return thought or None
+
+    @classmethod
+    def _thinking_text_from_value(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            for key in (
+                "thinking",
+                "text",
+                "content",
+                "reasoning",
+                "reasoning_content",
+                "summary",
+            ):
+                text = cls._thinking_text_from_value(value.get(key))
+                if text:
+                    return text
+            return ""
+        if isinstance(value, (list, tuple)):
+            parts = [cls._thinking_text_from_value(item) for item in value]
+            return "\n".join(part for part in parts if part)
+        return str(value).strip()
+
+    @classmethod
+    def _format_progress_block(cls, label: str, text: str) -> str:
+        body = str(text or "").strip()
+        if not body:
+            return ""
+        lines = body.splitlines()
+        if len(lines) == 1:
+            return f"{label}: {lines[0]}"
+        indented = "\n".join(f"  {line}" for line in lines)
+        return f"{label}:\n{indented}"
+
+    @classmethod
+    def _truncate_progress_text(cls, text: str) -> str:
+        body = str(text or "").strip()
+        if len(body) <= cls._PROGRESS_TEXT_LIMIT:
+            return body
+        return body[: cls._PROGRESS_TEXT_LIMIT].rstrip() + "…"
+
+    @staticmethod
+    def _attr_or_key(payload: Any, name: str) -> Any:
+        if payload is None:
+            return None
+        if isinstance(payload, dict):
+            return payload.get(name)
+        return getattr(payload, name, None)
+
+    @classmethod
+    def _provider_response_field(cls, raw: Any, name: str) -> Any:
+        value = cls._attr_or_key(raw, name)
+        if value not in (None, "", []):
+            return value
+        message = cls._attr_or_key(raw, "message")
+        value = cls._attr_or_key(message, name)
+        if value not in (None, "", []):
+            return value
+        choices = cls._attr_or_key(raw, "choices")
+        if not choices:
+            return None
+        first = choices[0]
+        message = cls._attr_or_key(first, "message")
+        return cls._attr_or_key(message, name)
+
     @staticmethod
     def _extract_action_line_from_response(content: str) -> str | None:
         parts = content.split("Action:", 1)
@@ -2841,21 +3021,18 @@ class GuiAgent:
         action: Action | None,
     ) -> None:
         raw = response.raw
-
-        def get_field(name: str) -> Any:
-            if isinstance(raw, dict):
-                return raw.get(name)
-            return getattr(raw, name, None)
-
-        reasoning_content = get_field("reasoning_content")
-        if reasoning_content:
+        reasoning_content = self._provider_response_field(raw, "reasoning_content")
+        if not reasoning_content:
+            reasoning_content = self._provider_response_field(raw, "reasoning")
+        thinking_text = self._thinking_text_from_value(reasoning_content)
+        if thinking_text:
             snapshot["reasoning_content"] = self._scrub_text_for_artifact_action(
-                str(reasoning_content), action
+                thinking_text, action
             )
-        thinking_blocks = get_field("thinking_blocks")
+        thinking_blocks = self._provider_response_field(raw, "thinking_blocks")
         if thinking_blocks:
             snapshot["thinking_blocks"] = self._scrub_for_artifact(thinking_blocks)
-        finish_reason = get_field("finish_reason")
+        finish_reason = self._provider_response_field(raw, "finish_reason")
         if finish_reason:
             snapshot["finish_reason"] = str(finish_reason)
 

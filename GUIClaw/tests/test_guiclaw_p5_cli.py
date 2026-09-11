@@ -202,6 +202,7 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert cfg.stagnation_limit == 0
     assert cfg.enable_repeat_escalation is True
     assert cfg.repeat_judge_model == "small"
+    assert cfg.enable_difficulty_routing is True
     assert cfg.enable_skill_execution is False
     assert cfg.enable_initial_skill_selector is False
     assert cfg.initial_skill_top_k == 5
@@ -251,6 +252,7 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
         stagnation_limit: 3
         enable_repeat_escalation: false
         repeat_judge_model: large
+        enable_difficulty_routing: false
         enable_skill_execution: true
         enable_initial_skill_selector: true
         initial_skill_top_k: 7
@@ -264,6 +266,7 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert scaled.stagnation_limit == 3
     assert scaled.enable_repeat_escalation is False
     assert scaled.repeat_judge_model == "large"
+    assert scaled.enable_difficulty_routing is False
     assert scaled.enable_skill_execution is True
     assert scaled.enable_initial_skill_selector is True
     assert scaled.initial_skill_top_k == 7
@@ -740,13 +743,24 @@ def test_standalone_cli_runs_enabled_postprocessing_before_return(
     monkeypatch.setattr(cli, "build_optional_components", fake_build_optional_components)
     monkeypatch.setattr(cli, "build_llm_provider", lambda _: postprocess_provider)
 
+    async def fake_easy_route(*_: Any, **__: Any) -> Any:
+        from guiclaw.difficulty import route_for_difficulty
+
+        return route_for_difficulty("easy", reason="test")
+
+    monkeypatch.setattr(cli, "resolve_difficulty_route", fake_easy_route)
+
     result = asyncio.run(cli._execute_agent(args, config, backend, provider, "Open Contacts"))
 
     assert result.success is True
     assert postprocess_state["components_embedding"] is embedding_provider
     assert agent_state["enable_prompt_skill_selection"] is False
     assert agent_state["enable_initial_skill_selector"] is True
+    assert agent_state["llm"] is provider
     assert agent_state["planner_llm"] is postprocess_provider
+    assert agent_state["agent_profile"] == "general_compact"
+    assert agent_state["difficulty_snapshot"]["difficulty"] == "easy"
+    assert agent_state["difficulty_snapshot"]["actor"] == "small"
     assert agent_state["enable_repeat_escalation"] is True
     assert agent_state["repeat_judge_model"] == "small"
     assert agent_state["initial_skill_selector_llm"] is postprocess_provider
@@ -769,6 +783,148 @@ def test_standalone_cli_runs_enabled_postprocessing_before_return(
         "task": "Open Contacts",
     }
     assert postprocess_state["drained"] is True
+
+
+def _execute_cli_agent_for_difficulty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    difficulty: str | None,
+    extra_args: list[str] | None = None,
+    enable_difficulty_routing: bool = True,
+) -> dict[str, Any]:
+    import guiclaw.cli as cli
+    from guiclaw.agent import AgentResult
+    from guiclaw.difficulty import route_for_difficulty
+
+    provider = object()
+    large = object()
+    agent_state: dict[str, Any] = {}
+    config = cli.CliConfig(
+        provider=cli.ProviderConfig(
+            base_url="http://localhost:1234/v1",
+            model="qwen-gui",
+            api_key="test-key",
+        ),
+        postprocess_provider=cli.ProviderConfig(
+            base_url="http://localhost:9012/v1",
+            model="qwen-general",
+            api_key="general-key",
+        ),
+        enable_difficulty_routing=enable_difficulty_routing,
+        memory_dir=tmp_path / "memory",
+        skills_dir=tmp_path / "skill",
+    )
+
+    class FakeRecorder:
+        def __init__(self, *, output_dir: Path, **_: Any) -> None:
+            self.path = output_dir / "traj.json"
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text("{}\n", encoding="utf-8")
+
+    class FakeGuiAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            agent_state.update(kwargs)
+
+        async def run(self, task: str, **_: Any) -> AgentResult:
+            return AgentResult(
+                success=True,
+                summary=f"Completed {task}",
+                model_summary=None,
+                trace_path=str(tmp_path),
+                steps_taken=1,
+                error=None,
+            )
+
+    async def fake_route(*_: Any, **kwargs: Any) -> Any:
+        if (
+            not kwargs.get("enabled", True)
+            or kwargs.get("explicit_profile")
+            or difficulty is None
+        ):
+            return None
+        return route_for_difficulty(difficulty, reason="test")
+
+    async def fake_build_optional_components(*_: Any, **__: Any) -> tuple[Any, Any, Any]:
+        return None, None, None
+
+    args = cli.parse_args(["--dry-run", "--task", "Open Contacts", *(extra_args or [])])
+    monkeypatch.setattr(cli, "TrajectoryRecorder", FakeRecorder)
+    monkeypatch.setattr(cli, "GuiAgent", FakeGuiAgent)
+    monkeypatch.setattr(cli, "build_optional_components", fake_build_optional_components)
+    monkeypatch.setattr(cli, "build_llm_provider", lambda _: large)
+    monkeypatch.setattr(cli, "resolve_difficulty_route", fake_route)
+    asyncio.run(cli._execute_agent(args, config, _FakeBackend(), provider, "Open Contacts"))
+    agent_state["__provider"] = provider
+    agent_state["__large"] = large
+    return agent_state
+
+
+def test_cli_easy_route_uses_small_model_and_compact_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = _execute_cli_agent_for_difficulty(monkeypatch, tmp_path, difficulty="easy")
+    assert state["llm"] is state["__provider"]
+    assert state["model"] == "qwen-gui"
+    assert state["agent_profile"] == "general_compact"
+    assert state["planner_llm"] is state["__large"]
+    assert state["difficulty_snapshot"]["actor"] == "small"
+
+
+def test_cli_medium_route_uses_large_model_and_compact_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = _execute_cli_agent_for_difficulty(monkeypatch, tmp_path, difficulty="medium")
+    assert state["llm"] is state["__large"]
+    assert state["model"] == "qwen-general"
+    assert state["agent_profile"] == "general_compact"
+    assert state["planner_llm"] is state["__large"]
+    assert state["difficulty_snapshot"]["actor"] == "large"
+
+
+def test_cli_hard_route_uses_large_model_and_e2e_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = _execute_cli_agent_for_difficulty(monkeypatch, tmp_path, difficulty="hard")
+    assert state["llm"] is state["__large"]
+    assert state["model"] == "qwen-general"
+    assert state["agent_profile"] == "general_e2e"
+    assert state["difficulty_snapshot"]["difficulty"] == "hard"
+
+
+def test_cli_agent_profile_flag_skips_difficulty_routing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = _execute_cli_agent_for_difficulty(
+        monkeypatch,
+        tmp_path,
+        difficulty="hard",
+        extra_args=["--agent-profile", "seed"],
+    )
+    assert state["llm"] is state["__provider"]
+    assert state["model"] == "qwen-gui"
+    assert state["agent_profile"] == "seed"
+    assert state["difficulty_snapshot"] is None
+
+
+def test_cli_disabled_difficulty_routing_keeps_configured_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = _execute_cli_agent_for_difficulty(
+        monkeypatch,
+        tmp_path,
+        difficulty="hard",
+        enable_difficulty_routing=False,
+    )
+    assert state["llm"] is state["__provider"]
+    assert state["model"] == "qwen-gui"
+    assert state["agent_profile"] is None
+    assert state["difficulty_snapshot"] is None
 
 
 def test_standalone_desktop_disables_skills_but_keeps_memory_postprocessing(

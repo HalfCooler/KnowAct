@@ -4245,6 +4245,36 @@ async def test_same_action_type_confirmed_repeat_replans_with_planner(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_agent_records_difficulty_route_event(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    agent = GuiAgent(
+        _ScriptedLLM([_done_response()]),
+        DryRunBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "easy task", events=events),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        difficulty_snapshot={
+            "difficulty": "easy",
+            "actor": "small",
+            "agent_profile": "general_compact",
+            "reason": "one tap",
+            "fallback": False,
+        },
+    )
+
+    result = await agent.run("Open Settings", max_retries=1)
+
+    assert result.success
+    assert any(
+        event.get("type") == "difficulty_route"
+        and event.get("difficulty") == "easy"
+        and event.get("actor") == "small"
+        and event.get("agent_profile") == "general_compact"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
 async def test_different_action_type_skips_repeat_judge(tmp_path: Path) -> None:
     backend = _RecordingBackend()
     small = _RecordingLLM(

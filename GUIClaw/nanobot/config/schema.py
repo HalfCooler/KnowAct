@@ -455,6 +455,7 @@ class GuiConfig(Base):
     stagnation_limit: int = 0
     enable_repeat_escalation: bool = True
     repeat_judge_model: Literal["small", "large"] = "small"
+    enable_difficulty_routing: bool = True
     embedding_model: str | None = None
     embedding_api_key: str = ""
     embedding_api_base: str | None = None

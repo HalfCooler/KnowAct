@@ -303,8 +303,61 @@ def test_gui_tool_routes_postprocessing_to_host_provider(tmp_workspace: Path) ->
 
     assert tool._llm_adapter._provider is gui_provider
     assert tool._llm_adapter._model == "gui-model"
+    assert tool._has_large_model is True
+    assert tool._postprocess_model == "host-model"
     assert tool._postprocessor._llm._provider is host_provider
     assert tool._postprocessor._llm._model == "host-model"
+
+
+@pytest.mark.asyncio
+async def test_gui_tool_difficulty_routes_hard_task_to_large_e2e(
+    tmp_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from guiclaw.agent import AgentResult
+    from guiclaw.difficulty import route_for_difficulty
+    from nanobot.agent.tools.gui import GuiSubagentTool
+
+    gui_provider = _MockNanobotProvider([])
+    host_provider = _MockNanobotProvider([])
+    captured: dict[str, Any] = {}
+
+    class FakeGuiAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        async def run(self, task: str, **_: Any) -> AgentResult:
+            return AgentResult(
+                success=True,
+                summary=f"Completed {task}",
+                model_summary=None,
+                trace_path=None,
+                steps_taken=1,
+                error=None,
+            )
+
+    async def fake_route(*_: Any, **__: Any) -> Any:
+        return route_for_difficulty("hard", reason="multi-app")
+
+    monkeypatch.setattr("nanobot.agent.tools.gui.GuiAgent", FakeGuiAgent)
+    monkeypatch.setattr("nanobot.agent.tools.gui.resolve_difficulty_route", fake_route)
+
+    tool = GuiSubagentTool(
+        gui_config=Config(gui={"backend": "dry-run"}).gui,
+        provider=gui_provider,
+        model="gui-model",
+        workspace=tmp_workspace,
+        postprocess_provider=host_provider,
+        postprocess_model="host-model",
+    )
+    await tool._run_task(tool._backend, "Plan a multi-city trip")
+
+    assert captured["llm"] is tool._postprocess_llm_adapter
+    assert captured["model"] == "host-model"
+    assert captured["agent_profile"] == "general_e2e"
+    assert captured["planner_llm"] is tool._postprocess_llm_adapter
+    assert captured["difficulty_snapshot"]["difficulty"] == "hard"
+    assert captured["difficulty_snapshot"]["actor"] == "large"
 
 
 @pytest.mark.asyncio
@@ -465,6 +518,7 @@ def test_gui_config_defaults() -> None:
     assert config.stagnation_limit == 0
     assert config.enable_repeat_escalation is True
     assert config.repeat_judge_model == "small"
+    assert config.enable_difficulty_routing is True
     assert config.image_scale_ratio == pytest.approx(0.5)
     assert config.history_image_window is None
     assert config.agent_profile is None
@@ -491,6 +545,9 @@ def test_gui_config_validation() -> None:
     assert GuiConfig.model_validate(
         {"enableRepeatEscalation": False}
     ).enable_repeat_escalation is False
+    assert GuiConfig.model_validate(
+        {"enableDifficultyRouting": False}
+    ).enable_difficulty_routing is False
     with pytest.raises(ValidationError):
         GuiConfig(backend="invalid")
     with pytest.raises(ValidationError):
