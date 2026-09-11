@@ -104,7 +104,15 @@ def test_general_compact_uses_rolling_memory_contract(tmp_path: Path) -> None:
     assert "原始任务定义唯一目标" in system_prompt
     assert "当前截图只用于验证状态和定位控件" in system_prompt
     assert "不得从结果页控件推导新目标" in system_prompt
-    assert "筛选/排序/条件属原任务，必须点击落地" in system_prompt
+    assert "筛选项属原任务，必须点击完成" in system_prompt
+    assert "JSON 必含 direction=left|right" in system_prompt
+    assert (
+        '{"action_type":"scroll","direction":"left","start_coordinate":[500,200],"memory":'
+        '{"current":"当前页面/任务状态","remaining":"原始任务中尚未完成的事项"}}'
+        in system_prompt
+    )
+    assert "禁止省略 scroll.direction" in system_prompt
+    assert "必须含 direction=up|down|left|right，缺则非法" in system_prompt
     assert "仅出结果列表不算完成" in system_prompt
     assert "截图验证全部明确要求后禁止继续操作" in system_prompt
     assert "只能 answer/status" in system_prompt
@@ -121,7 +129,7 @@ def test_general_compact_uses_rolling_memory_contract(tmp_path: Path) -> None:
     assert "duration_ms=1000|3000|5000|10000|30000|60000" in system_prompt
     assert "Thought:" not in system_prompt
     assert "<tool_call>" not in system_prompt
-    assert len(system_prompt) < 1_400
+    assert len(system_prompt) < 1_600
     assert messages[1]["content"][0]["text"] == "Instruction: Open Settings"
 
 
@@ -165,6 +173,47 @@ def test_general_compact_scales_images_without_changing_general_e2e(
     assert transmitted_size(compact_messages) == (356, 784)
     assert transmitted_size(general_messages) == (1080, 2376)
     assert "0-1000" in compact_messages[0]["content"]
+
+
+def test_general_compact_parses_scroll_with_required_direction() -> None:
+    payload = parse_profile_action(
+        "general_compact",
+        json.dumps(
+            {
+                "action_type": "scroll",
+                "direction": "left",
+                "start_coordinate": [500, 200],
+                "memory": {"current": "横向筛选条", "remaining": "滚到目标项后点击"},
+            },
+            ensure_ascii=False,
+        ),
+        screen_width=1080,
+        screen_height=2400,
+        model_name="qwen3.5-4b",
+    )
+
+    assert payload["action_type"] == "scroll"
+    assert payload["direction"] == "left"
+    assert payload["x"] == 540
+    assert payload["y"] == 480
+
+
+def test_general_compact_rejects_scroll_without_direction() -> None:
+    with pytest.raises(ValueError, match="scroll requires direction"):
+        parse_profile_action(
+            "general_compact",
+            json.dumps(
+                {
+                    "action_type": "scroll",
+                    "start_coordinate": [500, 200],
+                    "memory": {"current": "横向筛选条", "remaining": "滚到目标项后点击"},
+                },
+                ensure_ascii=False,
+            ),
+            screen_width=1080,
+            screen_height=2400,
+            model_name="qwen3.5-4b",
+        )
 
 
 def test_general_compact_parses_bare_json_with_general_dispatch_contract() -> None:

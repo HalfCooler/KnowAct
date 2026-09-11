@@ -7,11 +7,8 @@ GENERAL_COMPACT_PROMPT_TEMPLATE = Template(
 
 原始任务定义唯一目标；已确认/锁定记录已完成事实；当前截图只用于验证状态和定位控件。
 不得从结果页控件推导新目标，也不得把已完成事实改写为待办。
-筛选项属于原任务，必须点击完成；若筛选控件不可见，先点击到分类页再筛选，禁止搜索替代。
-若原任务要求的筛选项当前不可见：
-- 同一行存在多个同类型选项，优先视为横向可滚动筛选条；
-- 此时禁止点击相邻但错误的可见选项，必须对该筛选条执行一次横向 scroll，必须指明方向；
-- start_coordinate 必须落在目标筛选条内部，而不是屏幕其他区域；
+筛选项属原任务，必须点击完成；筛选控件不可见时先到分类页再筛，禁止搜索替代。
+目标筛选项不可见且同行有多个同类型选项时，视为横向筛选条；禁止点相邻错误项，必须对该条 scroll，JSON 必含 direction=left|right，start_coordinate 必须落在内部。
 不要因为目标文字当前不可见就判定不可完成。
 先判断原始任务是否已完成，再定位控件。仅出结果列表不算完成。截图验证全部明确要求后禁止继续操作，只能 answer/status；否则执行一个原子动作。
 
@@ -29,7 +26,7 @@ memory 只提交本轮增量：
 action_type 只能是以下之一：
 - click/long_press: coordinate=[x,y]
 - input_text: text
-- scroll: 必选direction=up|down|left|right，可选 start_coordinate=[x,y]
+- scroll: 必须含 direction=up|down|left|right，缺则非法；可选 start_coordinate=[x,y]
 - open_app: app_name
 - navigate_back/navigate_home/keyboard_enter: 无额外参数
 - wait: 可选 duration_ms=1000|3000|5000|10000|30000|60000，默认 1000ms
@@ -47,8 +44,9 @@ action_type 只能是以下之一：
 {% endif -%}
 输出只能是一个 JSON 对象，顶层必须同时包含 action_type 和 memory。
 操作结构：{"action_type":"click","coordinate":[500,300],"memory":{"current":"当前页面/任务状态","remaining":"原始任务中尚未完成的事项"}}
+滚动结构：{"action_type":"scroll","direction":"left","start_coordinate":[500,200],"memory":{"current":"当前页面/任务状态","remaining":"原始任务中尚未完成的事项"}}
 结束结构：{"action_type":"status","goal_status":"complete","memory":{"current":"任务已完成","remaining":"无"}}
 需向用户返回信息时将 status 换为 answer 并添加 text。memory.remaining="无" 时只能 answer/status；其他动作的 remaining 不得为“无”。
-coordinate/start_coordinate 必须是长度为 2 的数值数组。禁止 name/message/data/position 等其他 schema，以及变量名、占位符或字符串 "x"/"y"。禁止数组、代码块、解释、思考过程和多个 JSON。
+coordinate/start_coordinate 必须是长度为 2 的数值数组。禁止 name/message/data/position 等其他 schema，以及变量名、占位符或字符串 "x"/"y"。禁止省略 scroll.direction。禁止数组、代码块、解释、思考过程和多个 JSON。
 """.strip()
 )

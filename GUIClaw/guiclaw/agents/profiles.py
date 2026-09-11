@@ -369,6 +369,7 @@ def parse_profile_action(
                     summary = intent
                 if not isinstance(parsed_intent, str) or not parsed_intent.strip():
                     intent = summary
+                _reject_compact_scroll_without_direction(parsed_action)
         action = general_e2e_agent.parse_response_to_action(
             action_str,
             screen_width,
@@ -883,6 +884,24 @@ def _history_raw_response(turn: Any) -> str:
         turn.assistant_message.get("content") if isinstance(turn.assistant_message, dict) else None
     )
     return str(content or turn.action_summary or "")
+
+
+_COMPACT_SCROLL_ACTIONS = frozenset({"scroll", "swipe", "fling"})
+_COMPACT_SCROLL_DIRECTIONS = frozenset({"up", "down", "left", "right"})
+
+
+def _reject_compact_scroll_without_direction(parsed_action: dict[str, Any]) -> None:
+    """Fail closed: compact models often omit direction, and the shared parser
+    would otherwise silently default to ``down``."""
+    action_type = str(
+        parsed_action.get("action_type") or parsed_action.get("action") or ""
+    ).strip().lower()
+    if action_type not in _COMPACT_SCROLL_ACTIONS:
+        return
+    raw_direction = parsed_action.get("direction")
+    direction = str(raw_direction).strip().lower() if raw_direction is not None else ""
+    if direction not in _COMPACT_SCROLL_DIRECTIONS:
+        raise ValueError("scroll requires direction: up, down, left, or right")
 
 
 def _general_compact_memory_items(value: Any) -> list[str]:
