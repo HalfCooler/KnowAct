@@ -974,10 +974,12 @@ def _build_isolated_display_manager(args: argparse.Namespace, probe: Any) -> Any
 
 
 def _make_progress_printer(*, json_output: bool) -> Any:
-    async def _progress(message: str) -> None:
-        print(_scrub_progress_message(message), file=sys.stderr if json_output else sys.stdout)
+    from guiclaw.hf_cli import HfCliProgressPrinter
 
-    return _progress
+    return HfCliProgressPrinter(
+        json_output=json_output,
+        scrub=_scrub_progress_message,
+    )
 
 
 class _CliInterventionHandler:

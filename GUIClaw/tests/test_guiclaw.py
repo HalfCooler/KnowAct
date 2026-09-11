@@ -4290,7 +4290,7 @@ async def test_same_action_type_confirmed_repeat_replans_with_planner(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_agent_prints_difficulty_and_model_progress_before_gui_step(
+async def test_agent_generic_progress_keeps_original_gui_step_line(
     tmp_path: Path,
 ) -> None:
     progress: list[str] = []
@@ -4328,60 +4328,102 @@ async def test_agent_prints_difficulty_and_model_progress_before_gui_step(
     result = await agent.run("Open Settings", max_retries=1)
 
     assert result.success
-    assert progress[0] == (
-        "GUI difficulty: easy (actor=small, profile=general_compact): one tap"
-    )
-    step_progress = progress[1]
-    assert step_progress.startswith("GUI thinking (small): Look for the gear icon")
-    assert "GUI output (small):" in step_progress
-    assert "Thought: The Settings icon is visible." in step_progress
-    assert "Action: tap Settings" in step_progress
-    assert "GUI step 1/1:" in step_progress
-    thinking_at = step_progress.find("GUI thinking (small):")
-    output_at = step_progress.find("GUI output (small):")
-    step_at = step_progress.find("GUI step 1/1:")
-    assert thinking_at < output_at < step_at
+    assert progress == ["GUI step 1/1: task done – success"]
 
 
 @pytest.mark.asyncio
-async def test_agent_progress_uses_thought_prefix_when_provider_reasoning_missing(
+async def test_agent_hf_cli_prints_difficulty_and_step_output(
     tmp_path: Path,
 ) -> None:
-    progress: list[str] = []
+    from io import StringIO
 
-    async def on_progress(message: str) -> None:
-        progress.append(message)
+    from guiclaw.hf_cli import HfCliProgressPrinter
 
+    stream = StringIO()
+    printer = HfCliProgressPrinter(stream=stream)
+    response = LLMResponse(
+        content="Thought: The Settings icon is visible.\nAction: tap Settings",
+        tool_calls=[
+            ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={"action_type": "done", "status": "success"},
+            )
+        ],
+        raw=SimpleNamespace(reasoning_content="Look for the gear icon"),
+    )
     agent = GuiAgent(
-        _ScriptedLLM(
-            [
-                LLMResponse(
-                    content="Thought: Tap the visible Wi-Fi row.\nAction: {\"action_type\": \"done\"}",
-                    tool_calls=[
-                        ToolCall(
-                            id="call-1",
-                            name="computer_use",
-                            arguments={"action_type": "done", "status": "success"},
-                        )
-                    ],
-                )
-            ]
-        ),
+        _ScriptedLLM([response]),
         DryRunBackend(),
-        trajectory_recorder=_make_recorder(tmp_path, "wifi task"),
+        trajectory_recorder=_make_recorder(tmp_path, "easy task"),
         artifacts_root=tmp_path / "runs",
         max_steps=1,
-        progress_callback=on_progress,
+        progress_callback=printer,
+        difficulty_snapshot={
+            "difficulty": "easy",
+            "actor": "small",
+            "agent_profile": "general_compact",
+            "reason": "one tap",
+            "fallback": False,
+        },
     )
 
-    result = await agent.run("Enable Wi-Fi", max_retries=1)
+    result = await agent.run("Open Settings", max_retries=1)
 
     assert result.success
-    assert progress
-    assert "GUI thinking (gui): Tap the visible Wi-Fi row." in progress[0]
-    assert "GUI output (gui):" in progress[0]
-    assert "Thought: Tap the visible Wi-Fi row." in progress[0]
-    assert progress[0].index("GUI thinking (gui):") < progress[0].index("GUI step 1/1:")
+    text = stream.getvalue()
+    assert text.startswith("Task difficulty: easy\n")
+    assert "GUI thinking" not in text
+    assert "GUI output" not in text
+    assert "GUI difficulty:" not in text
+    assert "GUI Step 1/1: task done – success" in text
+    assert "Model Output:\nThought: The Settings icon is visible.\nAction: tap Settings" in text
+    assert "[Switched]" not in text
+
+
+@pytest.mark.asyncio
+async def test_agent_hf_cli_marks_switched_step_after_repeat_escalation(
+    tmp_path: Path,
+) -> None:
+    from io import StringIO
+
+    from guiclaw.hf_cli import HfCliProgressPrinter
+
+    stream = StringIO()
+    printer = HfCliProgressPrinter(stream=stream)
+    backend = _RecordingBackend()
+    small = _RecordingLLM(
+        [
+            _tap_response(step=1, x=10, y=10),
+            _tap_response(step=2, x=11, y=10),
+            _repeat_judge_response(True, reason="same button"),
+            _done_response(),
+        ]
+    )
+    planner = _RecordingLLM([_tap_response(step=2, x=80, y=90)])
+    agent = GuiAgent(
+        small,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "repeat escalate"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        progress_callback=printer,
+        planner_llm=planner,
+        enable_repeat_escalation=True,
+        repeat_judge_model="small",
+    )
+
+    result = await agent.run("Open the result", max_retries=1)
+
+    assert result.success
+    text = stream.getvalue()
+    step_lines = [line for line in text.splitlines() if line.startswith("GUI Step")]
+    assert step_lines[0].startswith("GUI Step 1/3:")
+    assert "[Switched]" not in step_lines[0]
+    assert step_lines[1].startswith("GUI Step 2/3 [Switched]:")
+    assert "Model Output: tap 1" in text
+    assert "Model Output: tap 2" in text
+    assert any(line.startswith("GUI Step 3/3:") for line in step_lines)
 
 
 @pytest.mark.asyncio

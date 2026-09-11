@@ -699,6 +699,9 @@ def test_cli_runs_dry_run_agent_loop(
     assert agent_state["history_image_window"] == 2
     assert agent_state["reasoning_effort"] == "none"
     assert agent_state["enable_prompt_skill_selection"] is False
+    from guiclaw.hf_cli import HfCliProgressPrinter
+
+    assert isinstance(agent_state["progress_callback"], HfCliProgressPrinter)
 
 
 def test_standalone_cli_runs_enabled_postprocessing_before_return(

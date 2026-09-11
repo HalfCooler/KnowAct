@@ -44,7 +44,6 @@ from guiclaw.interfaces import (
 )
 from guiclaw.observation import Observation
 from guiclaw.paths import DEFAULT_GUI_RUNS_DIR, DEFAULT_SHORTCUT_CACHE_DIR
-from guiclaw.difficulty import format_difficulty_progress
 from guiclaw.planner_escalation import (
     RepeatVerdict,
     build_repeat_judge_text,
@@ -381,10 +380,6 @@ class GuiAgent:
     _STAGNATION_SSIM_SIZE = 64
     _STAGNATION_SSIM_THRESHOLD = 0.985
     _PROGRESS_TEXT_LIMIT = 4000
-    _THOUGHT_RE = re.compile(
-        r"Thought:\s*(.*?)(?:\n\s*Action:|\Z)",
-        re.DOTALL | re.IGNORECASE,
-    )
 
     def __init__(
         self,
@@ -595,7 +590,7 @@ class GuiAgent:
                 "difficulty_route",
                 **self._difficulty_snapshot,
             )
-            await self._report_progress(format_difficulty_progress(self._difficulty_snapshot))
+            await self._emit_difficulty_progress(self._difficulty_snapshot.get("difficulty"))
 
         # 2. Retrieve memory context (once)
         memory_context = await self._retrieve_memory(task)
@@ -2788,6 +2783,12 @@ class GuiAgent:
             return
         await self.progress_callback(text)
 
+    async def _emit_difficulty_progress(self, task_difficulty: Any) -> None:
+        emit_difficulty = getattr(self.progress_callback, "emit_difficulty", None)
+        if not callable(emit_difficulty):
+            return
+        await emit_difficulty(task_difficulty)
+
     async def _report_step_progress(
         self,
         *,
@@ -2799,43 +2800,24 @@ class GuiAgent:
     ) -> None:
         if self.progress_callback is None:
             return
-        actor = "planner" if escalated else str(
-            (self._difficulty_snapshot or {}).get("actor") or "gui"
-        )
-        thinking = self._scrub_text_for_action(
-            self._extract_step_thinking(response),
-            action,
-        )
-        output = self._scrub_text_for_action(
-            self._extract_step_output(response),
-            action,
-        )
-        lines: list[str] = []
-        if thinking:
-            lines.append(self._format_progress_block(f"GUI thinking ({actor})", thinking))
-        if output:
-            lines.append(self._format_progress_block(f"GUI output ({actor})", output))
-        lines.append(
-            f"GUI step {step_index}/{total_steps}: {describe_action(action)}"
-        )
-        await self._report_progress("\n".join(line for line in lines if line))
-
-    def _extract_step_thinking(self, response: LLMResponse) -> str:
-        provider_thinking = self._thinking_text_from_value(
-            self._provider_response_field(response.raw, "reasoning_content")
-        )
-        if not provider_thinking:
-            provider_thinking = self._thinking_text_from_value(
-                self._provider_response_field(response.raw, "reasoning")
+        action_text = describe_action(action)
+        emit_step = getattr(self.progress_callback, "emit_step", None)
+        if callable(emit_step):
+            output = self._scrub_text_for_action(
+                self._extract_step_output(response),
+                action,
+            ) or ""
+            await emit_step(
+                step_index=step_index,
+                total_steps=total_steps,
+                action=action_text,
+                model_output=output,
+                switched=escalated,
             )
-        if not provider_thinking:
-            provider_thinking = self._thinking_text_from_value(
-                self._provider_response_field(response.raw, "thinking_blocks")
-            )
-        if provider_thinking:
-            return self._truncate_progress_text(provider_thinking)
-        thought = self._extract_thought_from_response(response.content or "")
-        return self._truncate_progress_text(thought or "")
+            return
+        await self._report_progress(
+            f"GUI step {step_index}/{total_steps}: {action_text}"
+        )
 
     def _extract_step_output(self, response: LLMResponse) -> str:
         content = str(response.content or "").strip()
@@ -2853,17 +2835,6 @@ class GuiAgent:
         except (TypeError, ValueError):
             payload = str(call.arguments or "")
         return self._truncate_progress_text(payload)
-
-    @classmethod
-    def _extract_thought_from_response(cls, content: str) -> str | None:
-        text = str(content or "").strip()
-        if not text:
-            return None
-        match = cls._THOUGHT_RE.search(text)
-        if match is None:
-            return None
-        thought = match.group(1).strip()
-        return thought or None
 
     @classmethod
     def _thinking_text_from_value(cls, value: Any) -> str:
@@ -2888,17 +2859,6 @@ class GuiAgent:
             parts = [cls._thinking_text_from_value(item) for item in value]
             return "\n".join(part for part in parts if part)
         return str(value).strip()
-
-    @classmethod
-    def _format_progress_block(cls, label: str, text: str) -> str:
-        body = str(text or "").strip()
-        if not body:
-            return ""
-        lines = body.splitlines()
-        if len(lines) == 1:
-            return f"{label}: {lines[0]}"
-        indented = "\n".join(f"  {line}" for line in lines)
-        return f"{label}:\n{indented}"
 
     @classmethod
     def _truncate_progress_text(cls, text: str) -> str:
