@@ -4260,9 +4260,10 @@ async def test_same_action_type_confirmed_repeat_replans_with_planner(tmp_path: 
             _tap_response(step=1, x=10, y=10),
             _tap_response(step=2, x=11, y=10),
             _repeat_judge_response(True, reason="same button"),
+            _done_response(),
         ]
     )
-    planner = _RecordingLLM([_done_response()])
+    planner = _RecordingLLM([_tap_response(step=2, x=80, y=90)])
     agent = GuiAgent(
         small,
         backend,
@@ -4277,10 +4278,13 @@ async def test_same_action_type_confirmed_repeat_replans_with_planner(tmp_path: 
     result = await agent.run("Open the result", max_retries=1)
 
     assert result.success
-    assert [action.action_type for action in backend.actions] == ["tap"]
-    assert backend.actions[0].x == 10
+    assert [(action.action_type, action.x) for action in backend.actions] == [
+        ("tap", 10),
+        ("tap", 80),
+    ]
     assert len(planner.calls) == 1
-    assert "rejected as a repeat" in _messages_text(planner.calls[0])
+    assert planner.calls[0] == small.calls[1]
+    assert "rejected as a repeat" not in _messages_text(planner.calls[0])
     assert any(event.get("type") == "planner_escalation" for event in events)
     assert any(event.get("type") == "repeat_judge" and event.get("repeated") is True for event in events)
 
@@ -4445,12 +4449,13 @@ async def test_repeat_judge_can_use_large_model(tmp_path: Path) -> None:
         [
             _tap_response(step=1, x=10, y=10),
             _tap_response(step=2, x=11, y=10),
+            _done_response(),
         ]
     )
     planner = _RecordingLLM(
         [
             _repeat_judge_response(True, reason="same button"),
-            _done_response(),
+            _tap_response(step=2, x=80, y=90),
         ]
     )
     agent = GuiAgent(
@@ -4467,10 +4472,16 @@ async def test_repeat_judge_can_use_large_model(tmp_path: Path) -> None:
     result = await agent.run("Open the result", max_retries=1)
 
     assert result.success
-    assert [action.action_type for action in backend.actions] == ["tap"]
+    assert [(action.action_type, action.x) for action in backend.actions] == [
+        ("tap", 10),
+        ("tap", 80),
+    ]
     assert any(_is_repeat_judge_call(call) for call in planner.calls)
     assert not any(_is_repeat_judge_call(call) for call in small.calls)
-    assert any("rejected as a repeat" in _messages_text(call) for call in planner.calls)
+    action_calls = [call for call in planner.calls if not _is_repeat_judge_call(call)]
+    assert len(action_calls) == 1
+    assert action_calls[0] == small.calls[1]
+    assert "rejected as a repeat" not in _messages_text(action_calls[0])
 
 
 @pytest.mark.asyncio

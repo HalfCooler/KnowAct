@@ -8,8 +8,8 @@ verdict selects both the actor model and the agent profile for the whole run:
 * hard   -> large model + ``general_e2e``
 
 Repeat-plan escalation is unchanged: when the actor is the small model it still
-hands a single step to the large model; when the actor is already the large
-model the same path replans with that large model.
+hands that same step input to the large model; when the actor is already the
+large model the same path resubmits the original step to that large model.
 """
 
 from __future__ import annotations

@@ -47,7 +47,6 @@ from guiclaw.paths import DEFAULT_GUI_RUNS_DIR, DEFAULT_SHORTCUT_CACHE_DIR
 from guiclaw.difficulty import format_difficulty_progress
 from guiclaw.planner_escalation import (
     RepeatVerdict,
-    build_repeat_escalation_hint,
     build_repeat_judge_text,
     canonicalize_repeat_judge_model,
     observation_ui_tree,
@@ -356,17 +355,17 @@ class GuiAgent:
             profile default (GUI-Owl: 5; other profiles: 1).
         progress_callback: Optional async callback for progress reporting.
         stagnation_limit: Consecutive unchanged-screen transitions before abort.
-        planner_llm: Optional larger model used for one-shot replanning when a
-            same-type action on a nearly unchanged UI tree is judged a repeat.
+        planner_llm: Optional larger model used for one step when a same-type
+            action on a nearly unchanged UI tree is judged a repeat.
         enable_repeat_escalation: When True and ``planner_llm`` is set, same-type
             plans on highly similar UI trees are judged and confirmed repeats
-            are replanned by the planner.
+            resubmit the same step input to the planner.
         repeat_judge_model: Which model judges repeats: ``small`` (GUI llm) or
             ``large`` (planner_llm). Defaults to ``small``.
         difficulty_snapshot: Optional verdict from the pre-run difficulty
             agent. Recorded on the trajectory; does not change step logic.
             When the main actor is already the large model, repeat escalation
-            replans with that same model.
+            resubmits that same model the original step input.
     """
 
     _MAX_TOOL_RETRIES = 3
@@ -1303,9 +1302,11 @@ class GuiAgent:
         escalated: bool,
         step_index: int,
     ) -> tuple[bool, dict[str, Any] | None]:
-        """Judge a same-type plan and rewrite ``messages`` for planner replan.
+        """Judge a same-type plan and hand the same step input to the planner.
 
-        Returns ``(should_replan, judge_snapshot)``.
+        A confirmed repeat restores ``messages`` to the original step request
+        so the large model sees the same input the small model just failed.
+        Returns ``(should_switch, judge_snapshot)``.
         """
         previous_tree = observation_ui_tree(previous_observation)
         current_tree = observation_ui_tree(current_observation)
@@ -1348,16 +1349,6 @@ class GuiAgent:
             return False, snapshot
 
         messages[:] = list(original_messages)
-        messages.append(
-            {
-                "role": "user",
-                "content": build_repeat_escalation_hint(
-                    previous=previous_action,
-                    proposed=proposed_action,
-                    reason=verdict.reason,
-                ),
-            }
-        )
         self._trajectory_recorder.record_event(
             "planner_escalation",
             step_index=step_index,

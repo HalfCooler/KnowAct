@@ -3,7 +3,7 @@
 The step loop first compares canonical action types in code, then the compact
 UI trees recorded with each observation. Only a matching type on a nearly
 unchanged tree (difference at most 5%) triggers a yes/no model verdict. A
-confirmed repeat replans that step with the large planner model once.
+confirmed repeat resubmits that same step input to the large planner model.
 """
 
 from __future__ import annotations
@@ -126,18 +126,6 @@ def build_repeat_judge_text(
         "field.\n\n"
         'Return JSON only: {"repeat": true, "reason": "short reason"} or '
         '{"repeat": false, "reason": "short reason"}.'
-    )
-
-
-def build_repeat_escalation_hint(*, previous: Action, proposed: Action, reason: str) -> str:
-    detail = str(reason or "").strip() or "the proposed action was judged a repeat"
-    return (
-        "The previous GUI step already used this action type, and the latest "
-        f"plan was rejected as a repeat ({detail}). "
-        f"Rejected plan: {format_action_for_judge(proposed)}. "
-        f"Previous action: {format_action_for_judge(previous)}. "
-        "Take one different action that makes progress. Do not repeat the "
-        "rejected operation."
     )
 
 
