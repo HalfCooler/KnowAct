@@ -373,6 +373,51 @@ async def test_openai_provider_forwards_optional_sampling_values(
 
 
 @pytest.mark.asyncio
+async def test_openai_provider_preserves_message_reasoning_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import guiclaw.cli as cli
+    from guiclaw.agent import GuiAgent
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            del kwargs
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        finish_reason="stop",
+                        message=types.SimpleNamespace(
+                            content="Thought: tap Settings\nAction: tap",
+                            tool_calls=None,
+                            reasoning_content="the gear icon is visible",
+                        ),
+                    )
+                ],
+                usage=None,
+            )
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+            self.chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(cli, "AsyncOpenAI", FakeAsyncOpenAI)
+    provider = cli.OpenAICompatibleLLMProvider(
+        base_url="http://localhost:8000/v1",
+        model="qwen3-vl",
+    )
+
+    response = await provider.chat([{"role": "user", "content": "test"}])
+
+    assert response.content == "Thought: tap Settings\nAction: tap"
+    assert response.raw.choices[0].message.reasoning_content == "the gear icon is visible"
+    assert (
+        GuiAgent._provider_response_field(response.raw, "reasoning_content")
+        == "the gear icon is visible"
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("base_url", "model", "configured", "expects_high_resolution"),
     [

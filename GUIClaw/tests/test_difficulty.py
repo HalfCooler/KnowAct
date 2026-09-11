@@ -7,6 +7,7 @@ import pytest
 from guiclaw.difficulty import (
     DifficultyRoute,
     canonicalize_task_difficulty,
+    format_difficulty_progress,
     judge_task_difficulty,
     parse_difficulty_verdict,
     resolve_difficulty_route,
@@ -43,6 +44,20 @@ def test_route_for_difficulty_maps_actor_and_profile() -> None:
     assert hard.agent_profile == "general_e2e"
     assert route_for_difficulty("unknown").difficulty == "medium"
     assert route_for_difficulty("unknown").fallback is True
+
+
+def test_format_difficulty_progress() -> None:
+    easy = route_for_difficulty("easy", reason="one tap")
+    assert format_difficulty_progress(easy) == (
+        "GUI difficulty: easy (actor=small, profile=general_compact): one tap"
+    )
+    assert format_difficulty_progress(easy.snapshot()) == format_difficulty_progress(easy)
+    fallback = route_for_difficulty("unknown", reason="unparsed_judge_response", fallback=True)
+    assert format_difficulty_progress(fallback) == (
+        "GUI difficulty: medium (actor=large, profile=general_compact, fallback): "
+        "unparsed_judge_response"
+    )
+    assert format_difficulty_progress(None) == ""
 
 
 def test_canonicalize_task_difficulty() -> None:

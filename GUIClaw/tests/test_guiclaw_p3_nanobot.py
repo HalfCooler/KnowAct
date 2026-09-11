@@ -358,6 +358,7 @@ async def test_gui_tool_difficulty_routes_hard_task_to_large_e2e(
     assert captured["planner_llm"] is tool._postprocess_llm_adapter
     assert captured["difficulty_snapshot"]["difficulty"] == "hard"
     assert captured["difficulty_snapshot"]["actor"] == "large"
+    assert captured["progress_callback"] is not None
 
 
 @pytest.mark.asyncio

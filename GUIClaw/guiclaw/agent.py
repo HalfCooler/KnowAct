@@ -2937,6 +2937,9 @@ class GuiAgent:
         if not choices:
             return None
         first = choices[0]
+        value = cls._attr_or_key(first, name)
+        if value not in (None, "", []):
+            return value
         message = cls._attr_or_key(first, "message")
         return cls._attr_or_key(message, name)
 

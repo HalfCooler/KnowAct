@@ -3125,6 +3125,47 @@ def test_agent_snapshot_preserves_provider_reasoning_and_finish_reason(tmp_path:
     assert snapshot["finish_reason"] == "tool_calls"
 
 
+def test_agent_snapshot_reads_openai_message_reasoning(tmp_path: Path) -> None:
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        DryRunBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "openai reasoning"),
+    )
+    action = Action(action_type="wait")
+    response = LLMResponse(
+        content="wait for the page",
+        tool_calls=[
+            ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={"action_type": "wait", "duration_ms": 500},
+            )
+        ],
+        raw=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="wait for the page",
+                        reasoning_content="the page is still loading",
+                    ),
+                    finish_reason="stop",
+                )
+            ]
+        ),
+    )
+    assistant_message = agent._build_assistant_message(response)
+
+    snapshot = agent._snapshot_model_response(
+        response=response,
+        action=action,
+        assistant_message=assistant_message,
+        action_text="Action: wait",
+    )
+
+    assert snapshot["reasoning_content"] == "the page is still loading"
+    assert snapshot["finish_reason"] == "stop"
+
+
 def test_agent_finalizes_step_result_with_shared_metrics(tmp_path: Path) -> None:
     agent = GuiAgent(
         _ScriptedLLM([]),
@@ -4242,6 +4283,101 @@ async def test_same_action_type_confirmed_repeat_replans_with_planner(tmp_path: 
     assert "rejected as a repeat" in _messages_text(planner.calls[0])
     assert any(event.get("type") == "planner_escalation" for event in events)
     assert any(event.get("type") == "repeat_judge" and event.get("repeated") is True for event in events)
+
+
+@pytest.mark.asyncio
+async def test_agent_prints_difficulty_and_model_progress_before_gui_step(
+    tmp_path: Path,
+) -> None:
+    progress: list[str] = []
+
+    async def on_progress(message: str) -> None:
+        progress.append(message)
+
+    response = LLMResponse(
+        content="Thought: The Settings icon is visible.\nAction: tap Settings",
+        tool_calls=[
+            ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={"action_type": "done", "status": "success"},
+            )
+        ],
+        raw=SimpleNamespace(reasoning_content="Look for the gear icon"),
+    )
+    agent = GuiAgent(
+        _ScriptedLLM([response]),
+        DryRunBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "easy task"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        progress_callback=on_progress,
+        difficulty_snapshot={
+            "difficulty": "easy",
+            "actor": "small",
+            "agent_profile": "general_compact",
+            "reason": "one tap",
+            "fallback": False,
+        },
+    )
+
+    result = await agent.run("Open Settings", max_retries=1)
+
+    assert result.success
+    assert progress[0] == (
+        "GUI difficulty: easy (actor=small, profile=general_compact): one tap"
+    )
+    step_progress = progress[1]
+    assert step_progress.startswith("GUI thinking (small): Look for the gear icon")
+    assert "GUI output (small):" in step_progress
+    assert "Thought: The Settings icon is visible." in step_progress
+    assert "Action: tap Settings" in step_progress
+    assert "GUI step 1/1:" in step_progress
+    thinking_at = step_progress.find("GUI thinking (small):")
+    output_at = step_progress.find("GUI output (small):")
+    step_at = step_progress.find("GUI step 1/1:")
+    assert thinking_at < output_at < step_at
+
+
+@pytest.mark.asyncio
+async def test_agent_progress_uses_thought_prefix_when_provider_reasoning_missing(
+    tmp_path: Path,
+) -> None:
+    progress: list[str] = []
+
+    async def on_progress(message: str) -> None:
+        progress.append(message)
+
+    agent = GuiAgent(
+        _ScriptedLLM(
+            [
+                LLMResponse(
+                    content="Thought: Tap the visible Wi-Fi row.\nAction: {\"action_type\": \"done\"}",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-1",
+                            name="computer_use",
+                            arguments={"action_type": "done", "status": "success"},
+                        )
+                    ],
+                )
+            ]
+        ),
+        DryRunBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "wifi task"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        progress_callback=on_progress,
+    )
+
+    result = await agent.run("Enable Wi-Fi", max_retries=1)
+
+    assert result.success
+    assert progress
+    assert "GUI thinking (gui): Tap the visible Wi-Fi row." in progress[0]
+    assert "GUI output (gui):" in progress[0]
+    assert "Thought: Tap the visible Wi-Fi row." in progress[0]
+    assert progress[0].index("GUI thinking (gui):") < progress[0].index("GUI step 1/1:")
 
 
 @pytest.mark.asyncio

@@ -1685,6 +1685,7 @@ class GuiSubagentTool(Tool):
             model=actor_model,
             artifacts_root=artifacts_root,
             max_steps=max_steps,
+            progress_callback=self._make_progress_printer(),
             policy_context=policy_context,
             skill_library=skill_library,
             skill_executor=skill_executor,
@@ -1751,6 +1752,15 @@ class GuiSubagentTool(Tool):
             },
             ensure_ascii=False,
         )
+
+    def _make_progress_printer(self) -> Any:
+        async def _progress(message: str) -> None:
+            text = str(message or "").rstrip()
+            if not text:
+                return
+            print(text, file=sys.stderr, flush=True)
+
+        return _progress
 
     @staticmethod
     def _shortcut_discovery_backend(active_backend: Any) -> Any | None:
